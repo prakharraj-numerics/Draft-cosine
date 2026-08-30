@@ -141,3 +141,5 @@ jobs:
           name: cosine53-formula-spine-9600-6973pc-${{ matrix.slot }}
           path: /tmp/c53formula
           if-no-files-found: error
+
+# fresh-run-trigger: 2026-08-30
