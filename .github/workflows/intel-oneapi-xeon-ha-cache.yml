@@ -9,14 +9,31 @@ on:
 
 jobs:
   intel-oneapi-ha:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Base packages + Intel repo
-        shell: bash
+      - name: Require exact 6973P-C host
+        id: gate
+        shell: bash --noprofile --norc -e -o pipefail {0}
         run: |
-          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo SKIP
+          fi
+
+      - name: Base packages + Intel repo
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
           sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends build-essential binutils curl xz-utils gpg-agent wget ca-certificates
@@ -25,6 +42,7 @@ jobs:
           sudo apt-get update -qq
 
       - name: Restore Intel oneAPI cache
+        if: steps.gate.outputs.eligible == '1'
         id: oneapi-cache
         uses: actions/cache@v4
         with:
@@ -32,22 +50,20 @@ jobs:
           key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
 
       - name: Install Intel oneAPI compiler and MKL on cache miss
-        if: steps.oneapi-cache.outputs.cache-hit != 'true'
-        shell: bash
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi-cache.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
         run: |
-          set -euo pipefail
           sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
           test -x /opt/intel/oneapi/compiler/latest/bin/icx
           test -d /opt/intel/oneapi/mkl/latest
 
       - name: Verify icx and oneMKL VML_HA batch cosine
-        shell: bash
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
           CC=/opt/intel/oneapi/compiler/latest/bin/icx
           MKLROOT=/opt/intel/oneapi/mkl/latest
-          test -x "$CC"
-          test -f "$MKLROOT/include/mkl.h"
           "$CC" --version
           cat >/tmp/check_vml_ha.c <<'EOF'
           #include <math.h>
