@@ -104,7 +104,7 @@ jobs:
           # Scale only the deterministic benchmark injectors: 100,000 unique inputs per band.
           cp cosine53_production_inject_unit3200.py /tmp/inject_unit100k.py
           cp cosine53_production_inject_wide3200.py /tmp/inject_wide100k.py
-          sed -i 's/3200/100000/g' /tmp/inject_unit100k.py /tmp/inject_wide100k.py
+          sed -i 's/3200/100000/g; s/1600/50000/g' /tmp/inject_unit100k.py /tmp/inject_wide100k.py
 
           cp cosine53_x50_unit_production.c /tmp/x50c.c
           python3 /tmp/inject_unit100k.py /tmp/x50c.c
