@@ -44,8 +44,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
-          icx --version
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          test -x "$CC"
+          test -f "$MKLROOT/include/mkl.h"
+          "$CC" --version
           cat >/tmp/check_vml_ha.c <<'EOF'
           #include <math.h>
           #include <stdio.h>
@@ -61,8 +64,7 @@ jobs:
               return 0;
           }
           EOF
-          MKLROOT=/opt/intel/oneapi/mkl/latest
-          icx -O3 -xHost -fp-model=precise -I"$MKLROOT/include" /tmp/check_vml_ha.c \
+          "$CC" -O3 -xHost -fp-model=precise -I"$MKLROOT/include" /tmp/check_vml_ha.c \
             -L"$MKLROOT/lib" -Wl,-rpath,"$MKLROOT/lib" \
             -Wl,--start-group \
             -lmkl_intel_lp64 -lmkl_sequential -lmkl_core \
