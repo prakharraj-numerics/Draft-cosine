@@ -1,0 +1,149 @@
+name: Cosine53 formula-spine 300K 6973P-C
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/cosine-53-formula-spine-300k-6973pc.yml'
+      - 'cosine53_apply_formula_conversion.py'
+      - 'cosine53_x50_unit_production.c'
+      - 'cosine53_x67_wide_production.c'
+      - 'cosine53_production_inject_unit3200.py'
+      - 'cosine53_production_inject_wide3200.py'
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512
+        id: gate
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+            echo "ELIGIBLE_XEON_6973PC=1 slot=${{ matrix.slot }}"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo "SKIP_NON_6973PC slot=${{ matrix.slot }}"
+          fi
+
+      - name: Base packages + Intel repo
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapicache
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapicache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+          test -x /opt/intel/oneapi/compiler/latest/bin/icx
+          test -d /opt/intel/oneapi/mkl/latest
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flintcache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT 3.6.0 on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flintcache.outputs.cache-hit != 'true'
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j"$(nproc)" >/dev/null
+          make install >/dev/null
+
+      - name: Build and benchmark formula-preserving cosine 300K
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+
+          # Frozen audited mathematical support. The Mode-5 secant spine is preserved.
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_fast2.c -o bench_sine_53_wide_fast2.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_intel.c -o bench_sine_53_wide_intel.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o sine_53_coeff_source.c
+
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+
+          # Scale only the deterministic benchmark injectors: 100,000 unique inputs per band.
+          cp cosine53_production_inject_unit3200.py /tmp/inject_unit100k.py
+          cp cosine53_production_inject_wide3200.py /tmp/inject_wide100k.py
+          sed -i 's/3200/100000/g' /tmp/inject_unit100k.py /tmp/inject_wide100k.py
+
+          cp cosine53_x50_unit_production.c /tmp/x50c.c
+          python3 /tmp/inject_unit100k.py /tmp/x50c.c
+          cp cosine53_x67_wide_production.c /tmp/x67c.c
+          python3 /tmp/inject_wide100k.py /tmp/x67c.c
+
+          python3 cosine53_apply_formula_conversion.py \
+            --coeff sine_53_coeff_source.c \
+            --base bench_sine_53_wide_intel.c \
+            --fast2 bench_sine_53_wide_fast2.c \
+            --source /tmp/x50c.c \
+            --source /tmp/x67c.c
+
+          grep -F 'cos(a+d) = cos(a) C(d^2) - sin(a) d T(d^2)' sine_53_coeff_source.c
+          ! grep -R -nE 'vmdSin|arb_sin|inneg\^parity\^rneg|inneg\^wide_neg' /tmp/x50c.c /tmp/x67c.c bench_sine_53_wide_fast2.c bench_sine_53_wide_intel.c
+          grep -F 'const int n=100000' /tmp/x50c.c
+          grep -F 'const int n=100000' /tmp/x67c.c
+          grep -F 'cases=100000 pos=50000 neg=50000' /tmp/x50c.c
+
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          "$CC" -O3 -xHost -fp-model=precise $INC /tmp/x50c.c -o /tmp/x50c $LIBS
+          "$CC" -O3 -xHost -fp-model=precise $INC /tmp/x67c.c -o /tmp/x67c $LIBS
+
+          mkdir -p /tmp/c53final300k
+          cp /tmp/x50c.c /tmp/c53final300k/cosine53_x50_generated_100k.c
+          cp /tmp/x67c.c /tmp/c53final300k/cosine53_x67_generated_200k.c
+          cp sine_53_coeff_source.c /tmp/c53final300k/cosine53_coeff_source_generated.c
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          echo 'COSINE53_FINAL_300K total_unique=300000 bands=100000+100000+100000 signs=50000pos+50000neg_each unit_engine=X50 wide_engine=X67 intel=oneMKL_vmdCos_VML_HA reference=Arb256 formula=Mode5_secant_spine fusion=cosC_minus_sinT' | tee /tmp/c53final300k/results.txt
+          stdbuf -oL -eL /tmp/x50c 2>&1 | tee -a /tmp/c53final300k/results.txt
+          stdbuf -oL -eL /tmp/x67c 2>&1 | tee -a /tmp/c53final300k/results.txt
+
+      - name: Upload eligible Xeon result
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosine53-final-300k-6973pc-${{ matrix.slot }}
+          path: /tmp/c53final300k
+          if-no-files-found: error
