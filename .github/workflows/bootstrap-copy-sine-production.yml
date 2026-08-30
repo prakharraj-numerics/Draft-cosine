@@ -1,0 +1,33 @@
+name: Bootstrap exact X50 X67 copies
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  copy:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy exact production sources from Draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/main/sine53_x50_unit_production.c -o sine53_x50_unit_production.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/main/sine53_x67_wide_production.c -o sine53_x67_wide_production.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/main/sine53_production_inject_unit3200.py -o sine53_production_inject_unit3200.py
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/main/sine53_production_inject_wide3200.py -o sine53_production_inject_wide3200.py
+          test "$(sha256sum sine53_x50_unit_production.c | awk '{print $1}')" = "ba79230dc0154f198129b21eb87fd0f96de0457e0a7f08f6e78ec2d29dd1806c"
+          test "$(sha256sum sine53_x67_wide_production.c | awk '{print $1}')" = "586fcc695a06a855ab0c59a8bc791618685d4fcbabdf459b56ccd6c0b9190c5c"
+      - name: Commit copied files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add sine53_x50_unit_production.c sine53_x67_wide_production.c sine53_production_inject_unit3200.py sine53_production_inject_wide3200.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Copy final sine X50 and X67 production sources"
+          git push
