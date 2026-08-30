@@ -45,9 +45,6 @@ def patch_intel_base(path: Path):
     s = path.read_text()
     s = replace_exact(s, "vmdSin", "vmdCos", label="base Intel comparator")
     s = replace_exact(s, "arb_sin", "arb_cos", label="base Arb reference")
-    # The scalar base reducer originally floors to a pi interval and folds around pi/2,
-    # which is sign-free for sine but not for cosine.  Nearest-pi reduction makes the
-    # cosine reconstruction exactly (-1)^q cos(|r|).
     old_reduce = "static inline double reduce_scalar(double x,int64_t *qout){double ax=fabs(x);int64_t q=(int64_t)(ax*INVPI);double qd=(double)q;double r=fma(-qd,PI_HI,ax);r=fma(-qd,PI_LO,r);if(r<0.0){q--;r+=PI_HI;r+=PI_LO;}else if(r>PI_HI){q++;r-=PI_HI;r-=PI_LO;}if(r>HALFPI_HI){r=(PI_HI-r)+PI_LO;}*qout=q;return r;}"
     new_reduce = "static inline double reduce_scalar(double x,int64_t *qout){double ax=fabs(x);int64_t q=(int64_t)nearbyint(ax*INVPI);double qd=(double)q;double r=fma(-qd,PI_HI,ax);r=fma(-qd,PI_LO,r);if(r<0.0)r=-r;*qout=q;return r;}"
     s = replace_exact(s, old_reduce, new_reduce, count=1, label="base nearest-pi cosine reducer")
@@ -58,10 +55,38 @@ def patch_intel_base(path: Path):
         count=1,
         label="base scalar cosine parity",
     )
-    # This older base AVX-512 evaluator is not the production X50/X67 path, but keep
-    # its sign semantics cosine-correct as well.
     s = s.replace("__mmask8 msign=(__mmask8)(minput^modd);", "__mmask8 msign=modd;")
     path.write_text(s)
+
+
+def patch_x67_raw_polynomial(s: str, name: str) -> str:
+    """Rotate X67's static sin/cos anchor fast path to cosine.
+
+    X67 bypasses k->tab and gathers x65_s/x65_c directly.  Its original grouped
+    polynomial is sin(a+d).  Keep the same degree-5/FMA grouping but evaluate
+    cos(a+d)=c-d*s + z[c*(-1/2+z/24) - (s*d)*(-1/6+z/120)].
+    The existing sg bit is the pi-period sign bit from the 512-entry table index,
+    so it remains valid for cosine as well.
+    """
+    marker = "OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8_rawx67("
+    if marker not in s:
+        return s
+
+    old = """            __m512d cd=_mm512_mul_pd(c1[g],d[g]);
+            /* Same polynomial, but fuse the potentially cancelling leading
+               terms first: base = c0 + c1*d.  Corrections are O(z). */
+            __m512d base=_mm512_fmadd_pd(c1[g],d[g],c0[g]);
+            __m512d ep=_mm512_mul_pd(c0[g],ec);
+            __m512d inner=_mm512_fmadd_pd(cd,oc,ep);
+            pv[g]=_mm512_fmadd_pd(z,inner,base);"""
+    new = """            __m512d sd=_mm512_mul_pd(c0[g],d[g]);
+            /* Cosine rotation of the same grouped degree-5 local polynomial:
+               base = cos(a) - sin(a)*d; corrections remain O(z). */
+            __m512d base=_mm512_fnmadd_pd(c0[g],d[g],c1[g]);
+            __m512d ep=_mm512_mul_pd(c1[g],ec);
+            __m512d inner=_mm512_fnmadd_pd(sd,oc,ep);
+            pv[g]=_mm512_fmadd_pd(z,inner,base);"""
+    return replace_exact(s, old, new, count=1, label=f"{name}: X67 raw cosine polynomial")
 
 
 def patch_production(path: Path):
@@ -81,8 +106,11 @@ def patch_production(path: Path):
     s = s.replace("inneg^parity^rneg", "parity")
 
     # Guarded pi/4 reducer: cosine is negative in octants 2,3,4,5.
-    # With existing masks this is exactly reflection_bit XOR sine_quadrant_bit.
     s = s.replace("inneg^wide_neg", "rev^wide_neg")
+
+    # X67's static 512-anchor fast path bypasses generated k->tab, so rotate its
+    # grouped local polynomial explicitly while preserving the Mode-5 degree/FMA shape.
+    s = patch_x67_raw_polynomial(s, path.name)
 
     # Any source-level scalar direct sign reconstruction must disappear for cosine.
     s = s.replace("signbit(x)?-p:p", "p")
@@ -108,7 +136,7 @@ def main():
     for p in args.source:
         patch_production(p)
 
-    print("COSINE53_FORMULA_CONVERSION_OK spine=Mode5_secant fusion=cosC_minus_sinT sign=cosine_parity")
+    print("COSINE53_FORMULA_CONVERSION_OK spine=Mode5_secant fusion=cosC_minus_sinT sign=cosine_parity x67_raw=cosine_rotated")
 
 
 if __name__ == "__main__":
