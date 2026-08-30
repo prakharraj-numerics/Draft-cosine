@@ -1,0 +1,61 @@
+name: Intel oneAPI Xeon HA cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/intel-oneapi-xeon-ha-cache.yml'
+
+jobs:
+  intel-oneapi-ha:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Intel oneAPI cache
+        id: oneapi-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI compiler and MKL on cache miss
+        if: steps.oneapi-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.repos.intel.com/oneapi/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/oneapi-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            intel-oneapi-compiler-dpcpp-cpp \
+            intel-oneapi-mkl-devel
+
+      - name: Verify icx and oneMKL VML_HA batch cosine
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+          icx --version
+          cat >/tmp/check_vml_ha.c <<'EOF'
+          #include <math.h>
+          #include <stdio.h>
+          #include <mkl.h>
+          int main(void) {
+              double x[8] = {0.0, 0.125, -0.25, 0.5, -0.75, 1.0, 10.0, -100.0};
+              double y[8];
+              vmdCos(8, x, y, VML_HA);
+              for (int i = 0; i < 8; ++i) {
+                  if (!isfinite(y[i])) return 2;
+              }
+              printf("INTEL_XEON_HA_BATCH_READY vmdCos_VML_HA=1 y0=%.17g\n", y[0]);
+              return 0;
+          }
+          EOF
+          icx -O3 -xHost -fp-model=precise /tmp/check_vml_ha.c \
+            -Wl,--start-group \
+            -lmkl_intel_lp64 -lmkl_sequential -lmkl_core \
+            -Wl,--end-group -lpthread -lm -ldl \
+            -o /tmp/check_vml_ha
+          /tmp/check_vml_ha
