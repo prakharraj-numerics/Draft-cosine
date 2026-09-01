@@ -20,7 +20,7 @@
 #define SHALLOW_ENGINE_WIDE 0
 #endif
 
-enum { TRIALS = 5 };
+enum { SHALLOW_TRIALS = 5 };
 
 static uint64_t shallow_mix64(uint64_t x)
 {
@@ -128,7 +128,7 @@ int main(void)
     const int c0 = SHALLOW_ENGINE_WIDE ? 2 : 0;
     const int c1 = SHALLOW_ENGINE_WIDE ? 6 : 2;
     printf("COS53_SHALLOW engine=%s cpu_pin=%d sizes=12 trials=%d random_batches_per_size=%d intel=oneMKL_vmdCos_VML_HA\n",
-           SHALLOW_ENGINE_WIDE ? "X67_wide" : "X50_unit", cpu, TRIALS, c1-c0);
+           SHALLOW_ENGINE_WIDE ? "X67_wide" : "X50_unit", cpu, SHALLOW_TRIALS, c1-c0);
 
     volatile double sink = 0.0;
     for (size_t si = 0; si < sizeof(sizes)/sizeof(sizes[0]); ++si) {
@@ -151,8 +151,8 @@ int main(void)
                 vmdCos((MKL_INT)n, x, yi, VML_HA);
             }
 
-            double ot[TRIALS], it[TRIALS];
-            for (int t = 0; t < TRIALS; ++t) {
+            double ot[SHALLOW_TRIALS], it[SHALLOW_TRIALS];
+            for (int t = 0; t < SHALLOW_TRIALS; ++t) {
                 if (t & 1) {
                     it[t] = shallow_run_intel(x, yi, n, reps, &sink);
                     ot[t] = shallow_run_ours(k, x, yo, n, reps, &sink);
@@ -161,9 +161,9 @@ int main(void)
                     it[t] = shallow_run_intel(x, yi, n, reps, &sink);
                 }
             }
-            qsort(ot, TRIALS, sizeof(double), shallow_cmp_d);
-            qsort(it, TRIALS, sizeof(double), shallow_cmp_d);
-            double om = ot[TRIALS/2], im = it[TRIALS/2];
+            qsort(ot, SHALLOW_TRIALS, sizeof(double), shallow_cmp_d);
+            qsort(it, SHALLOW_TRIALS, sizeof(double), shallow_cmp_d);
+            double om = ot[SHALLOW_TRIALS/2], im = it[SHALLOW_TRIALS/2];
             printf("RESULT n=%zu case=%s reps=%zu ours_ns=%.9f intel_ns=%.9f intel_over_ours=%.6f winner=%s\n",
                    n, shallow_case_name(c), reps, om, im, im/om,
                    om < im ? "OURS" : "INTEL");
