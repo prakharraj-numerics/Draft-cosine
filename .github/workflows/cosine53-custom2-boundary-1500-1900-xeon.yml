@@ -1,0 +1,245 @@
+name: Cosine53 custom2 boundary 1500-1900 vs current and Intel HA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/cosine53-custom2-boundary-1500-1900-xeon.yml'
+
+jobs:
+  benchmark:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 64
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU_MODEL=$MODEL"
+          lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE || true
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+            echo "ELIGIBLE_XEON_6973PC=1 slot=${{ matrix.slot }}"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo "SKIP_NON_6973PC slot=${{ matrix.slot }}"
+          fi
+
+      - name: Ensure GMP MPFR headers
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgmp-dev libmpfr-dev curl xz-utils
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Generate current cosine production translation units
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_fast2.c -o bench_sine_53_wide_fast2.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_intel.c -o bench_sine_53_wide_intel.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          cp cosine53_x50_unit_production.c generated_x50.c
+          cp cosine53_x67_wide_production.c generated_x67.c
+          python3 cosine53_apply_formula_conversion.py --coeff sine_53_coeff_source.c --base bench_sine_53_wide_intel.c --fast2 bench_sine_53_wide_fast2.c --source generated_x50.c --source generated_x67.c
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('generated_x50.c','generated_x67.c'):
+              p=Path(name); s=p.read_text(); old='\nint main(void)\n{'
+              if s.count(old)!=1: raise SystemExit(f'{name}: production main count={s.count(old)}')
+              p.write_text(s.replace(old,'\nint cosine53_embedded_main(void)\n{',1))
+          PY
+          ! grep -R -nE 'vmdSin|arb_sin|inneg\^parity\^rneg|inneg\^wide_neg' generated_x50.c generated_x67.c bench_sine_53_wide_fast2.c bench_sine_53_wide_intel.c
+
+      - name: Build focused boundary benchmark
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cos53-boundary
+          cp bench_cosine53_custom2_map.cpp /tmp/cos53_boundary.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cos53_boundary.cpp')
+          s=p.read_text()
+          old='''static const size_t sizes[] = {\n        50,250,1200,5000,10000,30000,50000,100000,\n        500000,1000000,2000000,4000000\n    };'''
+          new='''static const size_t sizes[] = {\n        1500,1600,1700,1800,1900\n    };'''
+          if s.count(old)!=2:
+              raise SystemExit(f'expected two size arrays, found {s.count(old)}')
+          p.write_text(s.replace(old,new))
+          PY
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          "$CC" -O3 -xHost -fp-model=precise $INC -DCOSINE53_GENERATED_SOURCE='"generated_x50.c"' -c cosine53_engine_adapter.c -o /tmp/cos53-boundary/x50_adapter.o
+          "$CC" -O3 -xHost -fp-model=precise $INC -DCOSINE53_GENERATED_SOURCE='"generated_x67.c"' -c cosine53_engine_adapter.c -o /tmp/cos53-boundary/x67_adapter.o
+          "$CXX" -O3 -xHost -fp-model=precise -std=c++17 $INC -DCUSTOM2_ENGINE_WIDE=0 /tmp/cos53_boundary.cpp /tmp/cos53-boundary/x50_adapter.o -o /tmp/cos53-boundary/unit $LIBS
+          "$CXX" -O3 -xHost -fp-model=precise -std=c++17 $INC -DCUSTOM2_ENGINE_WIDE=1 /tmp/cos53_boundary.cpp /tmp/cos53-boundary/x67_adapter.o -o /tmp/cos53-boundary/wide $LIBS
+          {
+            echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+            echo "SLOT=${{ matrix.slot }}"
+            echo "HEAD=$(git rev-parse HEAD)"
+            echo "SIZES=1500,1600,1700,1800,1900"
+            echo "CASES=unit_pos,unit_neg,mid_pos,mid_neg,far_pos,far_neg"
+            echo "CURRENT=X50_unit_for_unit;X67_wide_for_mid_far"
+            echo "CUSTOM2=permanent_CPU0_CPU2_32double_aligned_split"
+            echo "INTEL=oneMKL_vmdCos_VML_HA_sequential_CPU0"
+            echo "PROCESS_ISOLATION=current_custom2_intel_separate"
+            echo "OUTER_REPS=3 rotated_order"
+            "$CXX" --version | head -1
+          } | tee /tmp/cos53-boundary/build.txt
+
+      - name: Verify custom2 synchronization on boundary grid
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        env:
+          MKL_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          taskset -c 0,2 /tmp/cos53-boundary/unit verify | tee /tmp/cos53-boundary/verify-unit.txt
+          taskset -c 0,2 /tmp/cos53-boundary/wide verify | tee /tmp/cos53-boundary/verify-wide.txt
+          grep -F 'total_bitdiff=0' /tmp/cos53-boundary/verify-unit.txt
+          grep -F 'total_bitdiff=0' /tmp/cos53-boundary/verify-wide.txt
+
+      - name: Run isolated current custom2 Intel timing
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        env:
+          MKL_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          RAW=/tmp/cos53-boundary/raw.txt
+          : > "$RAW"
+          run_mode() {
+            local rep="$1" mode="$2" exe="$3"
+            echo "PROCESS outer=$rep mode=$mode exe=$exe" | tee -a "$RAW"
+            if [[ "$mode" == custom2 ]]; then
+              COS53_OUTER_REP="$rep" taskset -c 0,2 "$exe" "$mode" | tee -a "$RAW"
+            else
+              COS53_OUTER_REP="$rep" taskset -c 0 "$exe" "$mode" | tee -a "$RAW"
+            fi
+          }
+          for rep in 1 2 3; do
+            case "$rep" in
+              1) order=(current custom2 intel) ;;
+              2) order=(intel current custom2) ;;
+              3) order=(custom2 intel current) ;;
+            esac
+            for mode in "${order[@]}"; do
+              run_mode "$rep" "$mode" /tmp/cos53-boundary/unit
+              run_mode "$rep" "$mode" /tmp/cos53-boundary/wide
+            done
+          done
+
+      - name: Parse boundary result
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/cos53-boundary/results.txt
+          cat /tmp/cos53-boundary/build.txt > "$OUT"
+          cat /tmp/cos53-boundary/verify-unit.txt >> "$OUT"
+          cat /tmp/cos53-boundary/verify-wide.txt >> "$OUT"
+          python3 - <<'PY' | tee -a "$OUT"
+          import re, statistics
+          sizes=[1500,1600,1700,1800,1900]
+          cases=['unit_pos','unit_neg','mid_pos','mid_neg','far_pos','far_neg']
+          modes=['current','custom2','intel']
+          p=re.compile(r'RESULT outer=(\d+) mode=(current|custom2|intel) n=(\d+) case=(\w+) reps=(\d+) ns=([0-9.]+)')
+          vals={}
+          for line in open('/tmp/cos53-boundary/raw.txt'):
+              m=p.search(line)
+              if m:
+                  vals.setdefault((m.group(2),int(m.group(3)),m.group(4)),[]).append(float(m.group(6)))
+          med={}; missing=[]
+          for mode in modes:
+              for n in sizes:
+                  for c in cases:
+                      k=(mode,n,c)
+                      if len(vals.get(k,[]))!=3: missing.append((k,len(vals.get(k,[]))))
+                      else: med[k]=statistics.median(vals[k])
+          if missing: raise SystemExit(f'missing/duplicate cells: {missing}')
+          cw=ci=curi=0
+          for n in sizes:
+              for c in cases:
+                  cur=med[('current',n,c)]; cus=med[('custom2',n,c)]; inte=med[('intel',n,c)]
+                  cw += cus < cur; ci += cus < inte; curi += cur < inte
+                  print(f'CELL n={n} case={c} current={cur:.9f} custom2={cus:.9f} intel={inte:.9f} current_over_custom2={cur/cus:.6f} intel_over_custom2={inte/cus:.6f} intel_over_current={inte/cur:.6f} winner={min((cur,"CURRENT"),(cus,"CUSTOM2"),(inte,"INTEL"))[1]}')
+              def avg(mode): return sum(med[(mode,n,c)] for c in cases)/6
+              cur=avg('current'); cus=avg('custom2'); inte=avg('intel')
+              print(f'SUMMARY n={n} current={cur:.9f} custom2={cus:.9f} intel={inte:.9f} current_over_custom2={cur/cus:.6f} intel_over_custom2={inte/cus:.6f} intel_over_current={inte/cur:.6f} winner={min((cur,"CURRENT"),(cus,"CUSTOM2"),(inte,"INTEL"))[1]}')
+          print(f'OVERALL custom2_wins_current={cw}/30 custom2_wins_intel={ci}/30 current_wins_intel={curi}/30')
+          PY
+
+      - name: Upload exact Xeon result
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosine53-custom2-boundary-1500-1900-${{ matrix.slot }}
+          path: /tmp/cos53-boundary
+          if-no-files-found: error
