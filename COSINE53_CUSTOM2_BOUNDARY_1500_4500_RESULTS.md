@@ -50,4 +50,11 @@ At `n=1500`, custom2 wins only the two unit-domain cells; current wins the four 
 
 At every tested point from `n=2000` through `n=4500`, custom2 wins **all six cells** against current and Intel.
 
-The existing frozen production threshold remains `n>=5000` until explicitly changed.
+## Production promotion
+
+Following this boundary run, the production threshold was explicitly promoted and frozen as:
+
+- `n < 2000`: current COS53 evaluator
+- `n >= 2000`: custom2-core scheduler
+
+The production dispatcher is `cosine53_batch_production.hpp`, using `cosine53_custom_2core_2000_frozen.hpp`.
