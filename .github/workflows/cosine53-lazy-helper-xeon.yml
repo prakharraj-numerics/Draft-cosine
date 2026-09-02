@@ -1,0 +1,201 @@
+name: COS53 lazy helper vs production vs Intel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'cosine53_batch_lazy_candidate.hpp'
+      - 'bench_cosine53_lazy_native.cpp'
+      - '.github/workflows/cosine53-lazy-helper-xeon.yml'
+
+jobs:
+  benchmark:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 96
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      MKL_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU_MODEL=$MODEL VENDOR=$VENDOR SLOT=${{ matrix.slot }}"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+            echo ELIGIBLE_EXACT_XEON=1
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo SKIP_NON_EXACT_XEON
+          fi
+
+      - name: Install prerequisites
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgmp-dev libmpfr-dev curl xz-utils
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Generate COS53 translation units
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_fast2.c -o bench_sine_53_wide_fast2.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_intel.c -o bench_sine_53_wide_intel.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          cp cosine53_x50_unit_production.c generated_x50.c
+          cp cosine53_x67_wide_production.c generated_x67.c
+          python3 cosine53_apply_formula_conversion.py --coeff sine_53_coeff_source.c --base bench_sine_53_wide_intel.c --fast2 bench_sine_53_wide_fast2.c --source generated_x50.c --source generated_x67.c
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('generated_x50.c','generated_x67.c'):
+              p=Path(name); s=p.read_text(); old='\nint main(void)\n{'
+              if s.count(old)!=1: raise SystemExit(f'{name}: production main count={s.count(old)}')
+              p.write_text(s.replace(old,'\nint cosine53_embedded_main(void)\n{',1))
+          PY
+          ! grep -R -nE 'vmdSin|arb_sin|inneg\^parity\^rneg|inneg\^wide_neg' generated_x50.c generated_x67.c
+
+      - name: Build lazy-helper harnesses
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/coslazy/bin
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
+          "$CC" $COMMON $INC -DCOSINE53_GENERATED_SOURCE='"generated_x50.c"' -c cosine53_engine_adapter.c -o /tmp/coslazy/bin/unit_adapter.o
+          "$CC" $COMMON $INC -DCOSINE53_GENERATED_SOURCE='"generated_x67.c"' -c cosine53_engine_adapter.c -o /tmp/coslazy/bin/wide_adapter.o
+          "$CXX" -std=c++17 $COMMON $INC -DCOS53_ENGINE_WIDE=0 bench_cosine53_lazy_native.cpp /tmp/coslazy/bin/unit_adapter.o -o /tmp/coslazy/bin/unit $LIBS
+          "$CXX" -std=c++17 $COMMON $INC -DCOS53_ENGINE_WIDE=1 bench_cosine53_lazy_native.cpp /tmp/coslazy/bin/wide_adapter.o -o /tmp/coslazy/bin/wide $LIBS
+          {
+            echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+            echo "HEAD=$(git rev-parse HEAD)"
+            echo "SIZES=100,700,3500,15000,50000,1000000,2000000"
+            echo "PROD=frozen eager helper"
+            echo "LAZY=same routing but helper constructed only on first n>=1600"
+            echo "INTEL=oneMKL_vmdCos_VML_HA_sequential"
+            echo "NOTE=frozen production files untouched"
+          } | tee /tmp/coslazy/meta.txt
+
+      - name: Run production lazy Intel
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/coslazy/native.txt
+          for stack in prod lazy intel; do
+            for engine in unit wide; do
+              if [[ "$stack" == intel ]]; then cpus=0; else cpus=0,2; fi
+              taskset -c "$cpus" /tmp/coslazy/bin/$engine "$stack" | tee -a /tmp/coslazy/native.txt
+            done
+          done
+
+      - name: Aggregate lazy-helper result
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee /tmp/coslazy/results.txt
+          import pathlib,re
+          root=pathlib.Path('/tmp/coslazy')
+          print(root.joinpath('meta.txt').read_text(),end='')
+          sizes=[100,700,3500,15000,50000,1000000,2000000]
+          weights={'unit':2,'wide':4}
+          stacks=('prod','lazy','intel')
+          p=re.compile(r'LAZY_NATIVE engine=(unit|wide) stack=(prod|lazy|intel) n=(\d+) cases=(\d+) reps=(\d+) wall_ns_el=([0-9.]+) cpu_ns_el=([0-9.]+) effective_cores=([0-9.]+) maxrss_kib=(\d+) helper_started=(\d+) maxulp_vs_intel=(\d+)')
+          raw={}
+          for line in root.joinpath('native.txt').read_text().splitlines():
+              m=p.search(line)
+              if m:
+                  raw[(m.group(1),m.group(2),int(m.group(3)))]=dict(
+                      wall=float(m.group(6)),cpu=float(m.group(7)),cores=float(m.group(8)),
+                      rss=int(m.group(9)),helper=int(m.group(10)),ulp=int(m.group(11)))
+          print('HEADER_LAZY n stack wall_ns_el speedup_vs_intel speedup_vs_prod cpu_ns_el cpu_eff_vs_intel effective_cores maxrss_kib helper_started maxulp_vs_intel')
+          for n in sizes:
+              agg={s:dict(wall=0.0,cpu=0.0,rss=0,helper=0,ulp=0) for s in stacks}
+              for eng,w in weights.items():
+                  for s in stacks:
+                      z=raw[(eng,s,n)]
+                      agg[s]['wall'] += z['wall']*w/6.0
+                      agg[s]['cpu'] += z['cpu']*w/6.0
+                      agg[s]['rss'] = max(agg[s]['rss'],z['rss'])
+                      agg[s]['helper'] = max(agg[s]['helper'],z['helper'])
+                      agg[s]['ulp'] = max(agg[s]['ulp'],z['ulp'])
+              intel=agg['intel']; prod=agg['prod']
+              for s in stacks:
+                  a=agg[s]
+                  cores=a['cpu']/a['wall'] if a['wall'] else 0.0
+                  print(f'FINAL_LAZY n={n} stack={s} wall_ns_el={a["wall"]:.9f} speedup_vs_intel={intel["wall"]/a["wall"]:.6f} speedup_vs_prod={prod["wall"]/a["wall"]:.6f} cpu_ns_el={a["cpu"]:.9f} cpu_eff_vs_intel={intel["cpu"]/a["cpu"]:.6f} effective_cores={cores:.6f} maxrss_kib={a["rss"]} helper_started={a["helper"]} maxulp_vs_intel={a["ulp"]}')
+          PY
+          cat /tmp/coslazy/native.txt >> /tmp/coslazy/results.txt
+
+      - name: Upload lazy-helper artifact
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosine53-lazy-helper-${{ matrix.slot }}
+          path: /tmp/coslazy
