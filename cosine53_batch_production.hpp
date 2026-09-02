@@ -2,55 +2,62 @@
 
 /* COS53 FROZEN production batch routing.
 
-   Routing rule frozen from exact Intel Xeon 6973P-C benchmark evidence:
+   Resource-elastic routing frozen from exact Intel Xeon 6973P-C evidence:
 
-       n < 1600   -> current COS53 evaluator
-       n >= 1600  -> frozen custom permanent 2-core scheduler
+       n < 4500   -> current COS53 evaluator; custom2 helper does not exist
+       n >= 4500  -> construct/use the exact frozen permanent 2-core scheduler
 
-   Evidence:
-     Broad benchmark: GitHub Actions run 33562041646, exact Xeon shard 41.
-     Boundary benchmark: GitHub Actions run 33563237026, exact Xeon shard 5.
-     Replicated 1500-1900 boundary benchmark: GitHub Actions run 33564357475,
-     exact Xeon shards 23 and 38.
+   Once constructed, the helper remains alive for later large batches.
 
-     custom2 was bit-identical to current COS53 over the tested maps.
-     At n=1500, current COS53 won the all-six average on both replicated shards.
-     At n=1600, custom2 won the all-six average on both replicated shards,
-     although the margin was small and some individual cells remained mixed.
-     At n=1700 and n=1900, custom2 won all six cells on both replicated shards.
-     At every tested point from n=2000 through n=4000000, custom2 remained ahead
-     of current COS53 on the tested grid.
+   Evidence for this lifecycle/routing promotion:
+     Full native + SDE benchmark: GitHub Actions run 33690497495.
+     Exact Xeon 6973P-C artifacts: shards 3 and 20.
+     Tested sizes: 100, 700, 3500, 4500, 5000, 8000, 15000, 50000,
+                   1000000, 2000000.
 
-   This dispatcher changes scheduling only. The supplied evaluator remains the
-   same current COS53 implementation.
+   The promotion changes scheduling/lifecycle only. It does not change the COS53
+   mathematics, the supplied evaluator, or the frozen custom2 implementation.
 
-   FROZEN: do not change the 1600 threshold or scheduler in this file without a
-   new benchmark and an explicit production promotion.
+   At n=100, 700, and 3500 the helper remains absent, eliminating the previous
+   permanent-worker resource overhead. At n=4500 and above the same frozen
+   custom2 scheduler is used.
+
+   Accuracy in the promoted benchmark remained within an observed maximum
+   comparator difference of 2 ULP versus Intel VML_HA over the tested map.
+
+   FROZEN: do not change the <4500 lazy region, the 4500 activation boundary,
+   or the frozen scheduler without a new benchmark and explicit promotion.
 */
 
 #include <cstddef>
+#include <memory>
 #include "cosine53_custom_2core_1600_frozen.hpp"
 
 class Cosine53BatchProductionFrozen {
 public:
     using fn_t = void (*)(double *, const double *, size_t);
-    static constexpr size_t kCustom2MinN = 1600;
+    static constexpr size_t kCustom2MinN = 4500;
 
     explicit Cosine53BatchProductionFrozen(fn_t current_eval)
-        : current_eval_(current_eval), custom2_(current_eval) {}
+        : current_eval_(current_eval) {}
 
     Cosine53BatchProductionFrozen(const Cosine53BatchProductionFrozen&) = delete;
     Cosine53BatchProductionFrozen& operator=(const Cosine53BatchProductionFrozen&) = delete;
 
     void run(double *out, const double *in, size_t n) {
-        if (n >= kCustom2MinN) {
-            custom2_.run(out, in, n);
-        } else {
+        if (n < kCustom2MinN) {
             current_eval_(out, in, n);
+            return;
         }
+        if (!custom2_) {
+            custom2_ = std::make_unique<Cosine53CustomPermanent2Core1600Frozen>(current_eval_);
+        }
+        custom2_->run(out, in, n);
     }
+
+    bool helper_started() const noexcept { return static_cast<bool>(custom2_); }
 
 private:
     fn_t current_eval_;
-    Cosine53CustomPermanent2Core1600Frozen custom2_;
+    std::unique_ptr<Cosine53CustomPermanent2Core1600Frozen> custom2_;
 };
