@@ -2,34 +2,37 @@
 
 Current production routing is frozen as:
 
-- `n < 1600`: current COS53 evaluator
-- `n >= 1600`: frozen custom permanent 2-core scheduler
+- `n < 4500`: current COS53 evaluator; custom2 helper is not constructed
+- `n >= 4500`: construct/use the frozen permanent 2-core custom2 scheduler
+- after first construction, the helper remains alive for subsequent large batches
 
-The routing is backed by exact Intel Xeon 6973P-C benchmarks:
+This is a scheduling/lifecycle change only. The COS53 mathematics and the frozen custom2 scheduler are unchanged.
 
-- broad three-way run `33562041646`, shard `41`
-- focused 1500-4500 boundary run `33563237026`, shard `5`
-- replicated 1500-1900 boundary run `33564357475`, exact Xeon shards `23` and `38`
+## Promotion evidence
 
-custom2 was bit-identical to the current COS53 evaluator over the tested maps.
+The 4.5K lifecycle boundary was explicitly promoted after the full exact-Xeon benchmark:
 
-The replicated 1500-1900 run established the final production boundary used here:
+- GitHub Actions run `33690497495`
+- exact Intel Xeon 6973P-C artifacts: shards `3` and `20`
+- tested sizes: `100, 700, 3500, 4500, 5000, 8000, 15000, 50000, 1000000, 2000000`
+- native metrics: wall time, process CPU time, effective cores, RSS, and accuracy
+- SDE metrics: retired instructions per element and logical memory bytes per element
 
-- at `n=1500`, current COS53 won the all-six average on both exact-Xeon shards
-- at `n=1600`, custom2 won the all-six average on both exact-Xeon shards; the margin was small and some individual cells were mixed
-- at `n=1700`, custom2 won all six individual cells on both shards
-- at `n=1800`, custom2 won the all-six average on both shards, with one narrow individual-cell loss on shard 23
-- at `n=1900`, custom2 won all six individual cells on both shards
+The resource-elastic region was especially strong at `n=100`, `700`, and `3500`, where the helper stayed absent. At `n=4500` the helper/custom2 path activates exactly as benchmarked.
 
-The earlier focused and broad runs showed custom2 ahead throughout the tested range from 2,000 through 4,000,000.
+Observed maximum comparator difference versus Intel `vmdCos(..., VML_HA)` was no more than 2 ULP over the tested map.
 
-The user explicitly promoted `1600` as the final production boundary. It is therefore frozen as a measured average crossover boundary, not as a claim that every individual input case is faster exactly at `n=1600`.
+## Historical boundary
 
-Frozen production files:
+The prior production boundary was `1600`, backed by runs `33562041646`, `33563237026`, and `33564357475`. That boundary remains useful historical speed-crossover evidence, but it was superseded for production by the later resource-proportionality work: eagerly creating the permanent helper caused severe small-load CPU/instruction/memory overhead even when the current evaluator handled the batch.
+
+## Frozen production files
 
 - `cosine53_batch_production.hpp`
 - `cosine53_custom_2core_1600_frozen.hpp`
+- `cosine53_x50_unit_production.c`
+- `cosine53_x67_wide_production.c`
 
-The older `cosine53_custom_2core_2000_frozen.hpp` and `cosine53_custom_2core_5000_frozen.hpp` remain only as historical freeze evidence and are no longer used by the production dispatcher.
+The custom2 implementation filename still contains `1600` because that scheduler body itself remains the previously frozen implementation. The production dispatcher now controls when it is created and used.
 
-Do not change the 1,600 threshold or frozen scheduler without a new benchmark and explicit production promotion.
+Do not change the `<4500` lazy region, the `4500` activation boundary, the frozen scheduler, or the production COS53 kernels without a new benchmark and explicit promotion.
