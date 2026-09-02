@@ -162,22 +162,24 @@ static double median5(double v[5]) {
 
 static int native_mode(const std::string &which) {
     static const size_t sizes[] = {100,700,3500,15000,50000,1000000,2000000};
-    Cosine53BatchProductionFrozen prod(cos53_engine_eval);
+    Cosine53BatchProductionFrozen *prod = nullptr;
+    if (which == "prod") prod = new Cosine53BatchProductionFrozen(cos53_engine_eval);
     for (size_t n : sizes) {
         Buffers b;
-        if (!alloc_buffers(b, n)) return 10;
+        if (!alloc_buffers(b, n)) { delete prod; return 10; }
         const size_t cases = b.x.size();
         const size_t reps = reps_for(n, cases);
-        uint64_t maxulp = verify_vs_intel(prod, b);
+        uint64_t maxulp = 0;
+        if (which == "prod") maxulp = verify_vs_intel(*prod, b);
         for (int w = 0; w < 3; ++w) {
-            if (which == "prod") run_prod_once(prod, b); else run_intel_once(b);
+            if (which == "prod") run_prod_once(*prod, b); else run_intel_once(b);
         }
         double wall[5], cpu[5];
         for (int t = 0; t < 5; ++t) {
             double w0 = clock_ns(CLOCK_MONOTONIC_RAW);
             double c0 = clock_ns(CLOCK_PROCESS_CPUTIME_ID);
             for (size_t r = 0; r < reps; ++r) {
-                if (which == "prod") run_prod_once(prod, b); else run_intel_once(b);
+                if (which == "prod") run_prod_once(*prod, b); else run_intel_once(b);
             }
             double c1 = clock_ns(CLOCK_PROCESS_CPUTIME_ID);
             double w1 = clock_ns(CLOCK_MONOTONIC_RAW);
@@ -194,6 +196,7 @@ static int native_mode(const std::string &which) {
                     mw, mc, mw > 0.0 ? mc/mw : 0.0, ru.ru_maxrss,
                     (unsigned long long)maxulp);
     }
+    delete prod;
     std::printf("NATIVE_DONE engine=%s stack=%s sink=%.17g\n",
                 COS53_ENGINE_WIDE ? "wide" : "unit", which.c_str(), (double)g_sink);
     return 0;
@@ -202,11 +205,12 @@ static int native_mode(const std::string &which) {
 static int sde_mode(const std::string &which, size_t n) {
     Buffers b;
     if (!alloc_buffers(b, n)) return 20;
-    Cosine53BatchProductionFrozen prod(cos53_engine_eval);
-    if (which == "prod") run_prod_once(prod, b);
+    Cosine53BatchProductionFrozen *prod = nullptr;
+    if (which == "prod") prod = new Cosine53BatchProductionFrozen(cos53_engine_eval);
+    if (which == "prod") run_prod_once(*prod, b);
     else if (which == "intel") run_intel_once(b);
     cos53_profile_start();
-    if (which == "prod") run_prod_once(prod, b);
+    if (which == "prod") run_prod_once(*prod, b);
     else if (which == "intel") run_intel_once(b);
     else {
         for (size_t j = 0; j < b.x.size(); ++j) {
@@ -217,6 +221,7 @@ static int sde_mode(const std::string &which, size_t n) {
     if (which != "noop") g_sink += b.y[0][(n * 5u / 13u) % n];
     std::printf("SDE_PROGRAM engine=%s stack=%s n=%zu cases=%zu sink=%.17g\n",
                 COS53_ENGINE_WIDE ? "wide" : "unit", which.c_str(), n, b.x.size(), (double)g_sink);
+    delete prod;
     return 0;
 }
 
