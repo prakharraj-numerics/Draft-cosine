@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "cosine53_batch_production.hpp"
+#include "cosine53_custom_2core_1600_frozen.hpp"
 
 extern "C" int cos53_engine_init(void);
 extern "C" void cos53_engine_eval(double *, const double *, size_t);
@@ -60,13 +61,6 @@ static double clock_ns(clockid_t id) {
     struct timespec t;
     clock_gettime(id, &t);
     return (double)t.tv_sec * 1.0e9 + (double)t.tv_nsec;
-}
-
-static const char *case_name(int c) {
-    static const char *names[6] = {
-        "unit_pos", "unit_neg", "mid_pos", "mid_neg", "far_pos", "far_neg"
-    };
-    return names[c];
 }
 
 static void fill(double *x, size_t n, int c) {
@@ -131,13 +125,29 @@ static void run_prod_once(Cosine53BatchProductionFrozen &prod, Buffers &b) {
     for (size_t j = 0; j < b.x.size(); ++j) prod.run(b.y[j], b.x[j], b.n);
 }
 
+static void run_force_once(Cosine53CustomPermanent2Core1600Frozen &force, Buffers &b) {
+    for (size_t j = 0; j < b.x.size(); ++j) force.run(b.y[j], b.x[j], b.n);
+}
+
 static void run_intel_once(Buffers &b) {
     for (size_t j = 0; j < b.x.size(); ++j)
         vmdCos((MKL_INT)b.n, b.x[j], b.y[j], VML_HA);
 }
 
-static uint64_t verify_vs_intel(Cosine53BatchProductionFrozen &prod, Buffers &b) {
-    run_prod_once(prod, b);
+static void run_stack_once(const std::string &which,
+                           Cosine53BatchProductionFrozen *prod,
+                           Cosine53CustomPermanent2Core1600Frozen *force,
+                           Buffers &b) {
+    if (which == "prod") run_prod_once(*prod, b);
+    else if (which == "force") run_force_once(*force, b);
+    else run_intel_once(b);
+}
+
+static uint64_t verify_stack_vs_intel(const std::string &which,
+                                      Cosine53BatchProductionFrozen *prod,
+                                      Cosine53CustomPermanent2Core1600Frozen *force,
+                                      Buffers &b) {
+    run_stack_once(which, prod, force, b);
     for (size_t j = 0; j < b.x.size(); ++j)
         vmdCos((MKL_INT)b.n, b.x[j], b.ref[j], VML_HA);
     uint64_t mx = 0;
@@ -163,24 +173,24 @@ static double median5(double v[5]) {
 static int native_mode(const std::string &which) {
     static const size_t sizes[] = {100,700,3500,15000,50000,1000000,2000000};
     Cosine53BatchProductionFrozen *prod = nullptr;
+    Cosine53CustomPermanent2Core1600Frozen *force = nullptr;
     if (which == "prod") prod = new Cosine53BatchProductionFrozen(cos53_engine_eval);
+    else if (which == "force") force = new Cosine53CustomPermanent2Core1600Frozen(cos53_engine_eval);
+
     for (size_t n : sizes) {
         Buffers b;
-        if (!alloc_buffers(b, n)) { delete prod; return 10; }
+        if (!alloc_buffers(b, n)) { delete force; delete prod; return 10; }
         const size_t cases = b.x.size();
         const size_t reps = reps_for(n, cases);
         uint64_t maxulp = 0;
-        if (which == "prod") maxulp = verify_vs_intel(*prod, b);
-        for (int w = 0; w < 3; ++w) {
-            if (which == "prod") run_prod_once(*prod, b); else run_intel_once(b);
-        }
+        if (which != "intel") maxulp = verify_stack_vs_intel(which, prod, force, b);
+        for (int w = 0; w < 3; ++w) run_stack_once(which, prod, force, b);
+
         double wall[5], cpu[5];
         for (int t = 0; t < 5; ++t) {
             double w0 = clock_ns(CLOCK_MONOTONIC_RAW);
             double c0 = clock_ns(CLOCK_PROCESS_CPUTIME_ID);
-            for (size_t r = 0; r < reps; ++r) {
-                if (which == "prod") run_prod_once(*prod, b); else run_intel_once(b);
-            }
+            for (size_t r = 0; r < reps; ++r) run_stack_once(which, prod, force, b);
             double c1 = clock_ns(CLOCK_PROCESS_CPUTIME_ID);
             double w1 = clock_ns(CLOCK_MONOTONIC_RAW);
             const double denom = (double)reps * (double)n * (double)cases;
@@ -196,6 +206,7 @@ static int native_mode(const std::string &which) {
                     mw, mc, mw > 0.0 ? mc/mw : 0.0, ru.ru_maxrss,
                     (unsigned long long)maxulp);
     }
+    delete force;
     delete prod;
     std::printf("NATIVE_DONE engine=%s stack=%s sink=%.17g\n",
                 COS53_ENGINE_WIDE ? "wide" : "unit", which.c_str(), (double)g_sink);
@@ -206,21 +217,23 @@ static int sde_mode(const std::string &which, size_t n) {
     Buffers b;
     if (!alloc_buffers(b, n)) return 20;
     Cosine53BatchProductionFrozen *prod = nullptr;
+    Cosine53CustomPermanent2Core1600Frozen *force = nullptr;
     if (which == "prod") prod = new Cosine53BatchProductionFrozen(cos53_engine_eval);
-    if (which == "prod") run_prod_once(*prod, b);
-    else if (which == "intel") run_intel_once(b);
+    else if (which == "force") force = new Cosine53CustomPermanent2Core1600Frozen(cos53_engine_eval);
+
+    if (which != "noop") run_stack_once(which, prod, force, b);
     cos53_profile_start();
-    if (which == "prod") run_prod_once(*prod, b);
-    else if (which == "intel") run_intel_once(b);
-    else {
-        for (size_t j = 0; j < b.x.size(); ++j) {
+    if (which == "noop") {
+        for (size_t j = 0; j < b.x.size(); ++j)
             asm volatile("" : : "r"(b.x[j]), "r"(b.y[j]), "r"(b.n) : "memory");
-        }
+    } else {
+        run_stack_once(which, prod, force, b);
     }
     cos53_profile_stop();
     if (which != "noop") g_sink += b.y[0][(n * 5u / 13u) % n];
     std::printf("SDE_PROGRAM engine=%s stack=%s n=%zu cases=%zu sink=%.17g\n",
                 COS53_ENGINE_WIDE ? "wide" : "unit", which.c_str(), n, b.x.size(), (double)g_sink);
+    delete force;
     delete prod;
     return 0;
 }
@@ -233,8 +246,9 @@ int main(int argc, char **argv) {
     std::string mode = argv[1];
     int rc = 2;
     if (mode == "native-prod") rc = native_mode("prod");
+    else if (mode == "native-force") rc = native_mode("force");
     else if (mode == "native-intel") rc = native_mode("intel");
-    else if ((mode == "sde-prod" || mode == "sde-intel" || mode == "sde-noop") && argc == 3) {
+    else if ((mode == "sde-prod" || mode == "sde-force" || mode == "sde-intel" || mode == "sde-noop") && argc == 3) {
         size_t n = (size_t)std::strtoull(argv[2], nullptr, 10);
         rc = sde_mode(mode.substr(4), n);
     }
