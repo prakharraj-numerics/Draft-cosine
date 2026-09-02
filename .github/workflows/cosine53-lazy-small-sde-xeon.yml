@@ -1,0 +1,193 @@
+name: COS53 lazy small-batch SDE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/cosine53-lazy-small-sde-xeon.yml'
+
+jobs:
+  benchmark:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 96
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      MKL_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU_MODEL=$MODEL VENDOR=$VENDOR SLOT=${{ matrix.slot }}"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install prerequisites
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgmp-dev libmpfr-dev curl xz-utils
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Install Intel SDE 10.13.1
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lazysmall/sdekit && cd /tmp/lazysmall/sdekit
+          curl -fsSL -o sde.tar.xz https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+          echo '94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  sde.tar.xz' | sha256sum -c -
+          tar -xf sde.tar.xz
+          SDE="$(find /tmp/lazysmall/sdekit -maxdepth 2 -type f -name sde64 -print -quit)"
+          echo "SDE=$SDE" >> "$GITHUB_ENV"
+
+      - name: Generate COS53 translation units
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_fast2.c -o bench_sine_53_wide_fast2.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_intel.c -o bench_sine_53_wide_intel.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          cp cosine53_x50_unit_production.c generated_x50.c
+          cp cosine53_x67_wide_production.c generated_x67.c
+          python3 cosine53_apply_formula_conversion.py --coeff sine_53_coeff_source.c --base bench_sine_53_wide_intel.c --fast2 bench_sine_53_wide_fast2.c --source generated_x50.c --source generated_x67.c
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('generated_x50.c','generated_x67.c'):
+              p=Path(name); s=p.read_text(); old='\nint main(void)\n{'
+              if s.count(old)!=1: raise SystemExit(name)
+              p.write_text(s.replace(old,'\nint cosine53_embedded_main(void)\n{',1))
+          PY
+
+      - name: Build
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lazysmall/bin
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          COMMON='-O3 -g -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
+          "$CC" $COMMON $INC -DCOSINE53_GENERATED_SOURCE='"generated_x50.c"' -c cosine53_engine_adapter.c -o /tmp/lazysmall/bin/unit_adapter.o
+          "$CC" $COMMON $INC -DCOSINE53_GENERATED_SOURCE='"generated_x67.c"' -c cosine53_engine_adapter.c -o /tmp/lazysmall/bin/wide_adapter.o
+          "$CXX" -std=c++17 $COMMON $INC -DCOS53_ENGINE_WIDE=0 bench_cosine53_lazy_sde.cpp /tmp/lazysmall/bin/unit_adapter.o -o /tmp/lazysmall/bin/unit $LIBS
+          "$CXX" -std=c++17 $COMMON $INC -DCOS53_ENGINE_WIDE=1 bench_cosine53_lazy_sde.cpp /tmp/lazysmall/bin/wide_adapter.o -o /tmp/lazysmall/bin/wide $LIBS
+
+      - name: Profile 100 and 700
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          for n in 100 700; do
+            for engine in unit wide; do
+              for stack in lazy intel noop; do
+                d="/tmp/lazysmall/${engine}-${stack}-${n}"; mkdir -p "$d"
+                if [[ "$stack" == lazy ]]; then cpus=0,2; else cpus=0; fi
+                ( cd "$d"; taskset -c "$cpus" "$SDE" -mix -iform -global_region -control 'start:address:cos53_profile_start,stop:address:cos53_profile_stop' -omix mix.txt -- /tmp/lazysmall/bin/$engine "$stack" "$n" > program.txt )
+              done
+            done
+          done
+
+      - name: Aggregate
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          python3 - <<'PY' | tee /tmp/lazysmall/results.txt
+          import pathlib,re
+          root=pathlib.Path('/tmp/lazysmall')
+          def mix(p):
+              t=p.read_text(errors='replace'); blocks=re.findall(r'# \$global-dynamic-counts(.*?)# END_GLOBAL_DYNAMIC_STATS',t,re.S); sec=blocks[-1] if blocks else t; o={}
+              for k,v in re.findall(r'^\s*(\S+)\s+([0-9]+)\s*$',sec,re.M): o[k]=int(v)
+              if o.get('*total',0)<=0:
+                  q=[int(x) for x in re.findall(r'^\*total\s+([0-9]+)\s*$',t,re.M)];
+                  if q:o['*total']=q[-1]
+              return o
+          def d(a,b,k):return max(0,a.get(k,0)-b.get(k,0))
+          def mb(a,b):
+              s=0
+              for k in set(a)|set(b):
+                  m=re.match(r'^\*mem-(?:read|write)-(\d+)$',k)
+                  if m:s+=int(m.group(1))*max(0,a.get(k,0)-b.get(k,0))
+              return s
+          print('CPU=Intel(R) Xeon(R) 6973P-C')
+          for n in (100,700):
+              A={x:{'i':0,'b':0} for x in ('lazy','intel')}
+              for eng,w in (('unit',2),('wide',4)):
+                  raw={s:mix(root/f'{eng}-{s}-{n}'/'mix.txt') for s in ('lazy','intel','noop')}
+                  for s in ('lazy','intel'):
+                      A[s]['i']+=d(raw[s],raw['noop'],'*total'); A[s]['b']+=mb(raw[s],raw['noop'])
+              den=6.0*n; li=A['lazy']['i']/den; ii=A['intel']['i']/den; lb=A['lazy']['b']/den; ib=A['intel']['b']/den
+              print(f'FOCUS n={n} lazy_instr_el={li:.6f} intel_instr_el={ii:.6f} instr_eff_intel_over_lazy={ii/li:.6f} lazy_logical_B_el={lb:.6f} intel_logical_B_el={ib:.6f} memory_eff_intel_over_lazy={ib/lb:.6f}')
+          PY
+
+      - name: Upload
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosine53-lazy-small-sde-${{ matrix.slot }}
+          path: /tmp/lazysmall/results.txt
