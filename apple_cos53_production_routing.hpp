@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <dispatch/dispatch.h>
+#include <HalideRuntime.h>
 
 /*
- * Frozen Apple COS53 production routing, 2026-09-05.
+ * Apple COS53 production routing, 2026-09-05.
  *
  * Kernel/accuracy state:
  *   - Google Highway 1.4.0 Apple path
@@ -17,16 +19,19 @@
  *   - established 9600-case MPFR256 validator state: max <= 2 ULP
  *
  * Batch routing:
- *   n <      30,000 : existing frozen AppleTwoCoreHighway path
- *   30,000 <= n < 50,000 : dispatch_apply_f / DISPATCH_APPLY_AUTO, 32 pieces
+ *   n <       30,000 : existing frozen AppleTwoCoreHighway path
+ *   30,000 <= n <=40,000 : Halide runtime scheduler, 32 pieces
+ *   40,001 <= n < 50,000 : dispatch_apply_f / DISPATCH_APPLY_AUTO, 32 pieces
  *   50,000 <= n <100,000 : dispatch_apply_f / DISPATCH_APPLY_AUTO, 16 pieces
  *  100,000 <= n <1,000,000: dispatch_apply_f / DISPATCH_APPLY_AUTO, 12 pieces
- * 1,000,000 <= n          : dispatch_apply_f / DISPATCH_APPLY_AUTO, 24 pieces
+ * 1,000,000 <= n           : dispatch_apply_f / DISPATCH_APPLY_AUTO, 24 pieces
  *
  * Integration contract:
  *   - AppleTwoCoreHighway must be the already-frozen <30K helper.
  *   - cos53_eval_hwy(const double*, double*, size_t) must be the already-frozen
  *     K=2048 degree-3 Highway evaluator in the including translation unit.
+ *   - link a Halide standalone runtime providing halide_do_par_for and
+ *     halide_set_num_threads.
  *
  * This file changes orchestration only. It does not replace the COS53 math.
  */
@@ -34,9 +39,12 @@
 namespace apple_cos53_production {
 
 static constexpr std::size_t kDispatchThreshold = 30000;
+static constexpr std::size_t kHalideEndInclusive = 40000;
 static constexpr std::size_t kP32End = 50000;
 static constexpr std::size_t kP16End = 100000;
 static constexpr std::size_t kP12End = 1000000;
+static constexpr std::size_t kHalidePieces = 32;
+static constexpr int kHalideThreads = 3;
 
 static inline std::size_t frozen_piece_count(std::size_t n) noexcept {
     if (n < kDispatchThreshold) return 0;  // existing AppleTwoCoreHighway
@@ -44,6 +52,10 @@ static inline std::size_t frozen_piece_count(std::size_t n) noexcept {
     if (n < kP16End) return 16;
     if (n < kP12End) return 12;
     return 24;
+}
+
+static inline bool use_halide(std::size_t n) noexcept {
+    return n >= kDispatchThreshold && n <= kHalideEndInclusive;
 }
 
 struct ApplyCtx {
@@ -60,6 +72,15 @@ static inline void apply_piece(void* vp, std::size_t j) {
     cos53_eval_hwy(c->x + a, c->y + a, b - a);
 }
 
+static inline int halide_apply_piece(void*, int j, uint8_t* closure) {
+    auto* c = reinterpret_cast<ApplyCtx*>(closure);
+    const std::size_t jj = static_cast<std::size_t>(j);
+    const std::size_t a = (c->n * jj) / c->pieces;
+    const std::size_t b = (c->n * (jj + 1)) / c->pieces;
+    cos53_eval_hwy(c->x + a, c->y + a, b - a);
+    return 0;
+}
+
 static inline void run_stable_dispatch(const double* x,
                                        double* y,
                                        std::size_t n,
@@ -69,20 +90,51 @@ static inline void run_stable_dispatch(const double* x,
     dispatch_apply_f(p, DISPATCH_APPLY_AUTO, &ctx, apply_piece);
 }
 
+static inline void ensure_halide_threads() {
+    static const bool initialized = []() {
+        halide_set_num_threads(kHalideThreads);
+        return true;
+    }();
+    (void)initialized;
+}
+
+static inline void run_halide_dispatch(const double* x,
+                                       double* y,
+                                       std::size_t n,
+                                       std::size_t pieces) {
+    ensure_halide_threads();
+    const std::size_t p = std::min(pieces, n);
+    ApplyCtx ctx{x, y, n, p};
+    const int rc = halide_do_par_for(nullptr,
+                                     halide_apply_piece,
+                                     0,
+                                     static_cast<int>(p),
+                                     reinterpret_cast<uint8_t*>(&ctx));
+    if (rc != 0) {
+        // Preserve correctness if the Halide runtime reports a scheduling error.
+        run_stable_dispatch(x, y, n, pieces);
+    }
+}
+
 /*
- * Single production entry point for the frozen Apple routing map.
+ * Single production entry point for Apple routing.
  * tc is persistent and owned by the caller, matching the existing <30K path.
  */
 static inline void run(AppleTwoCoreHighway& tc,
                        const double* x,
                        double* y,
                        std::size_t n) {
-    const std::size_t pieces = frozen_piece_count(n);
-    if (pieces == 0) {
+    if (n < kDispatchThreshold) {
         tc.run(x, y, n);
         return;
     }
-    run_stable_dispatch(x, y, n, pieces);
+
+    if (use_halide(n)) {
+        run_halide_dispatch(x, y, n, kHalidePieces);
+        return;
+    }
+
+    run_stable_dispatch(x, y, n, frozen_piece_count(n));
 }
 
 } // namespace apple_cos53_production
