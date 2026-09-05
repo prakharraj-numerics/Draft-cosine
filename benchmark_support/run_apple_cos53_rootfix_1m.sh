@@ -67,7 +67,7 @@ static double cos53_rootfix_one(double x)
     double cp=std::fma(1.0/24.0,z,-0.5);
     cp=std::fma(cp,z,1.0);
     double v=std::fma(el,cp,sh);
-    if(((q&1)^(int)rn)) v=-v;
+    if(q&1) v=-v;
     return v;
 }
 
