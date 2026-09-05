@@ -13,7 +13,6 @@ git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/hi
 git clone https://github.com/fastflow/fastflow.git /tmp/fastflow
 git -C /tmp/fastflow checkout d476f66ab924d8d122f54b4b90aee00ef979aea8
 
-# ThreadPool is part of Highway's compiled contrib library, not purely header-only.
 cmake -S /tmp/highway -B /tmp/highway-build \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
@@ -67,9 +66,7 @@ insert=r'''};
 class AppleHighwayThreadPool2 {
     hwy::ThreadPool pool_;
 public:
-    AppleHighwayThreadPool2(): pool_(1) {
-        pool_.SetWaitMode(hwy::PoolWaitMode::kSpin);
-    }
+    AppleHighwayThreadPool2(): pool_(1) { pool_.SetWaitMode(hwy::PoolWaitMode::kSpin); }
     void run(const double *x,double *y,size_t n) {
         if (!n) return;
         if (n < 4) { cos53_eval_hwy(x,y,n); return; }
@@ -84,10 +81,7 @@ public:
 class AppleFastFlow2 {
     ff::ParallelFor pf_;
 public:
-    AppleFastFlow2(): pf_(2,true,true) {
-        // Static two-way partitioning needs no dedicated scheduler thread.
-        pf_.disableScheduler(true);
-    }
+    AppleFastFlow2(): pf_(2,true,true) { pf_.disableScheduler(true); }
     void run(const double *x,double *y,size_t n) {
         if (!n) return;
         if (n < 4) { cos53_eval_hwy(x,y,n); return; }
@@ -110,18 +104,11 @@ s=s.replace(old,new,1)
 
 bs=s.index('static int bench_mode(')
 be=s.index('\n#ifdef APPLE_COS53_VALIDATE_MPFR',bs)
-replacement=r'''static double measure_stack(const char* stack,
-                            AppleTwoCoreHighway &current,
-                            AppleHighwayThreadPool2 &highway,
-                            AppleFastFlow2 &fastflow,
-                            Buffers &b,size_t reps,double *cpu_out)
+replacement=r'''template <class Runner>
+static double measure_runner(Runner &runner,Buffers &b,size_t reps,double *cpu_out)
 {
-    auto once=[&]{
-        if(std::strcmp(stack,"current")==0) run_hwy2(current,b);
-        else if(std::strcmp(stack,"highway")==0) run_highwaypool(highway,b);
-        else run_fastflow(fastflow,b);
-    };
-    for(int w=0;w<12;w++) once();
+    auto once=[&]{ for(int c=0;c<6;c++) runner.run(b.x[c],b.y[c],b.n); };
+    for(int w=0;w<16;w++) once();
     double c0=process_cpu_ns(); uint64_t w0=now_ticks();
     for(size_t r=0;r<reps;r++) once();
     uint64_t w1=now_ticks(); double c1=process_cpu_ns();
@@ -131,46 +118,50 @@ replacement=r'''static double measure_stack(const char* stack,
     return ticks_to_ns(w1-w0)/den;
 }
 
-static int bench_three(size_t n,int order)
+static int bench_one(const std::string &stack,size_t n)
 {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
     Buffers b(n);
-    AppleTwoCoreHighway current;
-    AppleHighwayThreadPool2 highway;
-    AppleFastFlow2 fastflow;
-    const char* names[3]={"current","highway","fastflow"};
     const size_t reps=reps_for(n);
-    for(int j=0;j<3;j++) {
-        const char* name=names[(j+order)%3];
-        double cpu=0.0;
-        const double wall=measure_stack(name,current,highway,fastflow,b,reps,&cpu);
-        std::printf("APPLE_COS53_3WAY stack=%s n=%zu wall_ns_el=%.9f cpu_ns_el=%.9f effective_cores=%.6f reps=%zu sink=%.17g\n",
-                    name,n,wall,cpu,cpu/wall,reps,(double)g_sink);
-    }
+    double cpu=0.0,wall=0.0;
+    if(stack=="current") {
+        AppleTwoCoreHighway runner;
+        wall=measure_runner(runner,b,reps,&cpu);
+    } else if(stack=="highway") {
+        AppleHighwayThreadPool2 runner;
+        wall=measure_runner(runner,b,reps,&cpu);
+    } else if(stack=="fastflow") {
+        AppleFastFlow2 runner;
+        wall=measure_runner(runner,b,reps,&cpu);
+    } else return 3;
+    std::printf("APPLE_COS53_3WAY stack=%s n=%zu wall_ns_el=%.9f cpu_ns_el=%.9f effective_cores=%.6f reps=%zu sink=%.17g\n",
+                stack.c_str(),n,wall,cpu,cpu/wall,reps,(double)g_sink);
     return 0;
 }
 
 static int verify_three()
 {
     static const size_t sizes[]={64,100,400,1200,3000,5000,7500,10000,15000,20000,25000,29999};
-    AppleTwoCoreHighway current;
-    AppleHighwayThreadPool2 highway;
-    AppleFastFlow2 fastflow;
     size_t dh=0,df=0;
     for(size_t n:sizes) {
         Buffers b(n);
         std::vector<double> a(n),h(n),f(n);
-        for(int c=0;c<6;c++) {
-            current.run(b.x[c],a.data(),n);
-            highway.run(b.x[c],h.data(),n);
-            fastflow.run(b.x[c],f.data(),n);
-            size_t xh=0,xf=0;
-            for(size_t i=0;i<n;i++) {
-                xh += std::memcmp(&a[i],&h[i],sizeof(double))!=0;
-                xf += std::memcmp(&a[i],&f[i],sizeof(double))!=0;
+        {
+            AppleTwoCoreHighway current;
+            for(int c=0;c<6;c++) {
+                current.run(b.x[c],a.data(),n);
+                AppleHighwayThreadPool2 highway;
+                highway.run(b.x[c],h.data(),n);
+                AppleFastFlow2 fastflow;
+                fastflow.run(b.x[c],f.data(),n);
+                size_t xh=0,xf=0;
+                for(size_t i=0;i<n;i++) {
+                    xh += std::memcmp(&a[i],&h[i],sizeof(double))!=0;
+                    xf += std::memcmp(&a[i],&f[i],sizeof(double))!=0;
+                }
+                dh+=xh; df+=xf;
+                std::printf("APPLE_COS53_3WAY_VERIFY n=%zu case=%d highway_bitdiff=%zu fastflow_bitdiff=%zu\n",n,c,xh,xf);
             }
-            dh+=xh; df+=xf;
-            std::printf("APPLE_COS53_3WAY_VERIFY n=%zu case=%d highway_bitdiff=%zu fastflow_bitdiff=%zu\n",n,c,xh,xf);
         }
     }
     std::printf("APPLE_COS53_3WAY_VERIFY_DONE highway_bitdiff=%zu fastflow_bitdiff=%zu\n",dh,df);
@@ -180,7 +171,7 @@ static int verify_three()
 s=s[:bs]+replacement+s[be:]
 
 old='''    if(argc!=3) return 2;\n    std::string stack=argv[1]; size_t n=(size_t)std::strtoull(argv[2],nullptr,10);\n    if(stack!="hwy2" && stack!="apple") return 3;\n    return bench_mode(stack,n);'''
-new='''    if(argc==2 && std::string(argv[1])=="verify-three") return verify_three();\n    if(argc!=4 || std::string(argv[1])!="three") return 2;\n    size_t n=(size_t)std::strtoull(argv[2],nullptr,10);\n    int order=std::atoi(argv[3])%3; if(order<0) order+=3;\n    return bench_three(n,order);'''
+new='''    if(argc==2 && std::string(argv[1])=="verify-three") return verify_three();\n    if(argc!=4 || std::string(argv[1])!="one") return 2;\n    std::string stack=argv[2]; size_t n=(size_t)std::strtoull(argv[3],nullptr,10);\n    return bench_one(stack,n);'''
 assert old in s
 s=s.replace(old,new,1)
 p.write_text(s)
@@ -198,9 +189,9 @@ fi
 if [[ "${1:-}" == "verify" ]]; then
   exec /tmp/apple_cos53_3way verify-three
 fi
-
-if [[ "${1:-}" != "three" || $# -ne 3 ]]; then
-  echo "usage: $0 build | verify | three N ORDER" >&2
-  exit 2
+if [[ "${1:-}" == "one" && $# -eq 3 ]]; then
+  exec /tmp/apple_cos53_3way "$@"
 fi
-exec /tmp/apple_cos53_3way "$@"
+
+echo "usage: $0 build | verify | one current|highway|fastflow N" >&2
+exit 2
