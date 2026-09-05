@@ -1,0 +1,75 @@
+name: Apple COS53 Custom2 below30K vs baseline
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'benchmark_support/apple_cos53_custom2_core.hpp'
+      - 'benchmark_support/run_apple_cos53_custom2_below30k_compare.sh'
+      - '.github/workflows/apple-cos53-custom2-below30k-vs-baseline.yml'
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact K2048 degree3 kernel and Apple Custom2 port
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The harness builds once; this first untimed-for-analysis call is only
+          # a build/smoke invocation. Its timing is deliberately not recorded.
+          bash benchmark_support/run_apple_cos53_custom2_below30k_compare.sh baseline 64 >/tmp/build-smoke.txt
+          cat /tmp/build-smoke.txt
+
+      - name: Verify scheduler is bitwise identical
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/apple_custom2_compare verify-custom2 | tee /tmp/custom2-verify.txt
+          grep -q 'APPLE_CUSTOM2_VERIFY_DONE total_bitdiff=0' /tmp/custom2-verify.txt
+
+      - name: Benchmark full below-30K routing range
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          {
+            echo "slot=${{ matrix.slot }}"
+            echo "cpu=$(sysctl -n machdep.cpu.brand_string)"
+            echo "kernel=K2048 degree3 frozen math"
+            echo "baseline=AppleTwoCoreHighway hybrid spin+semaphore"
+            echo "candidate=Apple Custom2 permanent spin worker, generation/completion atomics, 32-double split"
+          } > "$OUT"
+
+          sizes=(100 400 1200 3000 5000 7500 10000 15000 20000 25000 29999)
+          for round in 1 2 3; do
+            for n in "${sizes[@]}"; do
+              if (( round % 2 )); then
+                echo "ROUND=$round ORDER=baseline-first n=$n" >> "$OUT"
+                /tmp/apple_custom2_compare baseline "$n" | tee -a "$OUT"
+                /tmp/apple_custom2_compare custom2 "$n" | tee -a "$OUT"
+              else
+                echo "ROUND=$round ORDER=custom2-first n=$n" >> "$OUT"
+                /tmp/apple_custom2_compare custom2 "$n" | tee -a "$OUT"
+                /tmp/apple_custom2_compare baseline "$n" | tee -a "$OUT"
+              fi
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-custom2-below30k-${{ matrix.slot }}
+          path: |
+            /tmp/out/results.txt
+            /tmp/custom2-verify.txt
+          if-no-files-found: error
