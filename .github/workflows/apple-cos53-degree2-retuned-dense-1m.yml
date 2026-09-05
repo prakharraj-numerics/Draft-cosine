@@ -1,0 +1,30 @@
+name: Apple COS53 retuned degree2 dense-grid 1M accuracy
+
+on:
+  push:
+    paths:
+      - 'benchmark_support/run_apple_cos53_degree2_retuned_dense_1m.sh'
+      - '.github/workflows/apple-cos53-degree2-retuned-dense-1m.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        k: [4096, 8192, 16384, 32768, 65536]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate retuned degree2 K=${{ matrix.k }} on stressed 1M set
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_degree2_retuned_dense_1m.sh '${{ matrix.k }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-degree2-retuned-K${{ matrix.k }}-1m
+          path: /tmp/degree2_retuned_K${{ matrix.k }}_1m.txt
+          if-no-files-found: error
