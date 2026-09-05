@@ -1,4 +1,4 @@
-name: Apple COS53 useful orchestration exhaustive
+name: Apple COS53 30K best GCD vs Apple
 on:
   workflow_dispatch:
   push:
@@ -7,7 +7,7 @@ on:
 jobs:
   benchmark:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix: {slot: [1,2,3,4]}
@@ -39,7 +39,7 @@ jobs:
           FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
           clang -O2 -DNDEBUG -I/tmp -I$FP/include -I$MP/include -I$GP/include /tmp/bridge.c /tmp/gen.c -L$FP/lib -L$MP/lib -L$GP/lib -lflint -lmpfr -lgmp -lm -o /tmp/gen
           /tmp/gen /tmp/apple_cos53_constants_2ulp.h
-      - name: Generate orchestration benchmark
+      - name: Generate benchmark
         shell: bash
         run: |
           set -euo pipefail
@@ -51,24 +51,13 @@ jobs:
           s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;').replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
           s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
           start=s.index('        auto c2 = hn::Mul(c0, mh);'); end=s.index('        uint64_t sm0=', start)
-          cubic='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''
-          s=s[:start]+cubic+s[end:]
-          needle='class AppleTwoCoreHighway {'
-          adapter='''static inline void cos53_eval_range(const double* x,double* y,size_t a,size_t b) {\n    cos53_eval_hwy(x+a,y+a,b-a);\n}\n\n'''
-          s=s.replace(needle,adapter+needle,1)
+          s=s[:start]+'''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''+s[end:]
+          s=s.replace('class AppleTwoCoreHighway {','static inline void cos53_eval_range(const double* x,double* y,size_t a,size_t b) { cos53_eval_hwy(x+a,y+a,b-a); }\n\nclass AppleTwoCoreHighway {',1)
           marker='static size_t reps_for(size_t n)'
           inject=r'''
-          class GCDHighway {
-            dispatch_queue_t q_; size_t chunk_;
-          public:
-            GCDHighway(size_t chunk,qos_class_t qos):chunk_(chunk) {
-              auto attr=dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,qos,0);
-              q_=dispatch_queue_create("cos53.gcd",attr);
-            }
-            void run(const double*x,double*y,size_t n) {
-              size_t m=(n+chunk_-1)/chunk_;
-              dispatch_apply(m,q_,^(size_t j){size_t a=j*chunk_,b=std::min(n,a+chunk_);cos53_eval_range(x,y,a,b);});
-            }
+          class GCDHighway { dispatch_queue_t q_; size_t chunk_; public:
+            GCDHighway(size_t chunk,qos_class_t qos):chunk_(chunk){auto attr=dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,qos,0);q_=dispatch_queue_create("cos53.gcd",attr);}
+            void run(const double*x,double*y,size_t n){size_t m=(n+chunk_-1)/chunk_;dispatch_apply(m,q_,^(size_t j){size_t a=j*chunk_,b=std::min(n,a+chunk_);cos53_eval_range(x,y,a,b);});}
           };
           static void run_gcd(GCDHighway &g,Buffers &b){for(int c=0;c<6;c++)g.run(b.x[c],b.y[c],b.n);}
           '''
@@ -77,27 +66,24 @@ jobs:
           new='''    AppleTwoCoreHighway *tc = stack=="hwy2" ? new AppleTwoCoreHighway() : nullptr;\n    GCDHighway *g=nullptr;\n    if(stack.rfind("gcd_ui_",0)==0) g=new GCDHighway(std::stoull(stack.substr(7)),QOS_CLASS_USER_INTERACTIVE);\n    if(stack.rfind("gcd_init_",0)==0) g=new GCDHighway(std::stoull(stack.substr(9)),QOS_CLASS_USER_INITIATED);\n    auto once=[&]{ if(stack=="apple")run_apple(b); else if(stack=="hwy2")run_hwy2(*tc,b); else run_gcd(*g,b); };'''
           assert old in s; s=s.replace(old,new,1)
           s=s.replace('    delete tc;\n    return 0;','    delete tc; delete g;\n    return 0;',1)
-          # Original harness rejects any mode except hwy2/apple. Permit the two GCD prefixes.
           old_guard='if(stack!="hwy2" && stack!="apple") return 3;'
           new_guard='if(stack!="hwy2" && stack!="apple" && stack.rfind("gcd_ui_",0)!=0 && stack.rfind("gcd_init_",0)!=0) return 3;'
           assert old_guard in s; s=s.replace(old_guard,new_guard,1)
           p.write_text(s)
           PY
-          COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks'
-          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/orch.cpp -framework Accelerate -pthread -o /tmp/orch
-      - name: Run baseline and cache/QoS sweep
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks -I/tmp -I/tmp/highway /tmp/orch.cpp -framework Accelerate -pthread -o /tmp/orch
+      - name: Benchmark 30K only
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out; OUT=/tmp/out/results.txt
           echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
-          sizes=(100 400 1200 3000 5000 20000 50000 200000)
-          modes=(hwy2 apple gcd_ui_256 gcd_ui_512 gcd_ui_1024 gcd_ui_2048 gcd_ui_4096 gcd_ui_8192 gcd_init_256 gcd_init_512 gcd_init_1024 gcd_init_2048 gcd_init_4096 gcd_init_8192)
-          for n in "${sizes[@]}"; do
-            for mode in "${modes[@]}"; do /tmp/orch "$mode" "$n" | tee -a "$OUT"; done
+          # Apple vvcos plus strongest GCD region from the 20K/50K sweep. Repeat each mode 5x.
+          modes=(apple gcd_ui_256 gcd_ui_512 gcd_ui_1024 gcd_init_256 gcd_init_512 gcd_init_1024 gcd_init_2048)
+          for r in 1 2 3 4 5; do
+            for mode in "${modes[@]}"; do /tmp/orch "$mode" 30000 | tee -a "$OUT"; done
           done
-          sysctl hw.cachelinesize hw.l1dcachesize hw.l2cachesize hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu 2>/dev/null | tee -a "$OUT" || true
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-orchestration-${{ matrix.slot }}
+          name: apple-cos53-30k-${{ matrix.slot }}
           path: /tmp/out
