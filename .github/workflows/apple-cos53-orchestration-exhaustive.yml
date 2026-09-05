@@ -1,4 +1,4 @@
-name: Apple COS53 stable partition region map
+name: Apple COS53 final 1M partition benchmark
 on:
   workflow_dispatch:
   push:
@@ -84,21 +84,18 @@ jobs:
           p.write_text(s)
           PY
           clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks -I/tmp -I/tmp/highway /tmp/orch.cpp -framework Accelerate -pthread -o /tmp/orch
-      - name: Dense stable partition sweep
+      - name: Final 1M confirmation
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out; OUT=/tmp/out/results.txt
           echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
           echo "cacheline=$(sysctl -n hw.cachelinesize) l1d=$(sysctl -n hw.l1dcachesize) l2=$(sysctl -n hw.l2cachesize)" | tee -a "$OUT"
-          sizes=(30000 35000 40000 50000 75000 100000 150000 200000 500000 1000000)
           modes=(stable_12 stable_16 stable_24 stable_32)
-          for r in 1 2 3 4 5; do
-            for n in "${sizes[@]}"; do
-              for mode in "${modes[@]}"; do /tmp/orch "$mode" "$n" | tee -a "$OUT"; done
-            done
+          for r in 1 2 3 4 5 6 7 8 9 10; do
+            for mode in "${modes[@]}"; do /tmp/orch "$mode" 1000000 | tee -a "$OUT"; done
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-stable-region-${{ matrix.slot }}
+          name: apple-cos53-final-1m-${{ matrix.slot }}
           path: /tmp/out
