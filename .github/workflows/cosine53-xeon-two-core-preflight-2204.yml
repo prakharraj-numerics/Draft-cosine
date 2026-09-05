@@ -1,0 +1,45 @@
+name: COS53 Xeon two-core preflight ubuntu2204
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/cosine53-xeon-two-core-preflight-2204.yml'
+
+jobs:
+  preflight:
+    strategy:
+      fail-fast: false
+      max-parallel: 96
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Exact Xeon and CPU0-CPU2 concurrency gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          ALLOWED="$(grep Cpus_allowed_list /proc/self/status | awk '{print $2}')"
+          echo "SLOT=${{ matrix.slot }} CPU_MODEL=$MODEL VENDOR=$VENDOR ALLOWED=$ALLOWED"
+          if [[ "$VENDOR" != GenuineIntel || "$MODEL" != *"6973P-C"* ]] || ! grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo "PREFLIGHT skip=not_exact_xeon"
+            exit 0
+          fi
+          taskset -c 0,2 true || { echo 'PREFLIGHT exact_xeon=1 cpu2_allowed=0'; exit 4; }
+          cat >/tmp/two_core_gate.c <<'C'
+          #define _GNU_SOURCE
+          #include <pthread.h>
+          #include <sched.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <time.h>
+          typedef struct { int cpu; double cpu_s; } arg_t;
+          static double sec(clockid_t id){ struct timespec t; clock_gettime(id,&t); return (double)t.tv_sec + 1e-9*(double)t.tv_nsec; }
+          static void *worker(void *vp){ arg_t *a=(arg_t*)vp; cpu_set_t s; CPU_ZERO(&s); CPU_SET(a->cpu,&s); if(pthread_setaffinity_np(pthread_self(),sizeof(s),&s)!=0){a->cpu_s=-1;return 0;} volatile uint64_t x=1; double c0=sec(CLOCK_THREAD_CPUTIME_ID); while(sec(CLOCK_THREAD_CPUTIME_ID)-c0<0.300) x=x*2862933555777941757ULL+3037000493ULL; a->cpu_s=sec(CLOCK_THREAD_CPUTIME_ID)-c0; return (void*)(uintptr_t)(x&1); }
+          int main(void){ arg_t a[2]={{0,0},{2,0}}; pthread_t t[2]; double w0=sec(CLOCK_MONOTONIC); if(pthread_create(&t[0],0,worker,&a[0])||pthread_create(&t[1],0,worker,&a[1])) return 3; pthread_join(t[0],0); pthread_join(t[1],0); double wall=sec(CLOCK_MONOTONIC)-w0; if(a[0].cpu_s<0||a[1].cpu_s<0) return 4; double eff=(a[0].cpu_s+a[1].cpu_s)/wall; printf("PREFLIGHT exact_xeon=1 cpu0_s=%.6f cpu2_s=%.6f wall_s=%.6f effective_cores=%.6f pass=%d\n",a[0].cpu_s,a[1].cpu_s,wall,eff,eff>=1.60); return eff>=1.60?0:2; }
+          C
+          cc -O2 -pthread /tmp/two_core_gate.c -o /tmp/two_core_gate
+          /tmp/two_core_gate
