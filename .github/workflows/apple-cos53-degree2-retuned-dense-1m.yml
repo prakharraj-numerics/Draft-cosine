@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'benchmark_support/run_apple_cos53_degree2_retuned_dense_1m.sh'
+      - 'benchmark_support/run_apple_cos53_degree2_retuned_dense_1m_fixed.sh'
       - '.github/workflows/apple-cos53-degree2-retuned-dense-1m.yml'
   workflow_dispatch:
 
@@ -22,7 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash benchmark_support/run_apple_cos53_degree2_retuned_dense_1m.sh '${{ matrix.k }}'
+          bash benchmark_support/run_apple_cos53_degree2_retuned_dense_1m_fixed.sh '${{ matrix.k }}'
       - uses: actions/upload-artifact@v4
         with:
           name: apple-cos53-degree2-retuned-K${{ matrix.k }}-1m
