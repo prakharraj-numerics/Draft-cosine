@@ -35,6 +35,7 @@ cat >/tmp/decompose.cpp <<'CPP'
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include "apple_cos53_constants_2ulp.h"
 
 static uint64_t ob(double x){uint64_t u;memcpy(&u,&x,8);return (u>>63)?~u:(u|UINT64_C(0x8000000000000000));}
@@ -59,12 +60,11 @@ int main(){
  double er_curc=signedv(eval_comp(erh,erl,j,c0,c1));
  double cr_exc=signedv(eval_comp(rh,rl,j,ec0,ec1));
  double er_exc=signedv(eval_comp(erh,erl,j,ec0,ec1));
- // MPFR degree-3 Taylor using exact residual and exact anchor cos/sin.
  mpfr_set_d(md,a,MPFR_RNDN); mpfr_sub(md,mabs,md,MPFR_RNDN);
- mpfr_mul(mpoly,md,md,MPFR_RNDN); // d2
- mpfr_mul(mt,mc,mpoly,MPFR_RNDN); mpfr_div_ui(mt,mt,2,MPFR_RNDN); mpfr_sub(mpoly,mc,mt,MPFR_RNDN); // c0-c0*d2/2
- mpfr_mul(mt,ms,md,MPFR_RNDN); mpfr_add(mpoly,mpoly,mt,MPFR_RNDN); // + c1*d
- mpfr_mul(mt,md,md,MPFR_RNDN);mpfr_mul(mt,mt,md,MPFR_RNDN);mpfr_mul(mt,mt,ms,MPFR_RNDN);mpfr_div_ui(mt,mt,6,MPFR_RNDN);mpfr_sub(mpoly,mpoly,mt,MPFR_RNDN); // - c1*d3/6
+ mpfr_mul(mpoly,md,md,MPFR_RNDN);
+ mpfr_mul(mt,mc,mpoly,MPFR_RNDN); mpfr_div_ui(mt,mt,2,MPFR_RNDN); mpfr_sub(mpoly,mc,mt,MPFR_RNDN);
+ mpfr_mul(mt,ms,md,MPFR_RNDN); mpfr_add(mpoly,mpoly,mt,MPFR_RNDN);
+ mpfr_mul(mt,md,md,MPFR_RNDN);mpfr_mul(mt,mt,md,MPFR_RNDN);mpfr_mul(mt,mt,ms,MPFR_RNDN);mpfr_div_ui(mt,mt,6,MPFR_RNDN);mpfr_sub(mpoly,mpoly,mt,MPFR_RNDN);
  if(((q&1)^rn))mpfr_neg(mpoly,mpoly,MPFR_RNDN); double hp3=mpfr_get_d(mpoly,MPFR_RNDN);
  printf("DECOMP x=%.17g q=%ld rn=%d j=%d anchor=%.17g\n",x,q,(int)rn,j,a);
  printf("RED current_rh=%.17g current_rl=%.17g exact_rh=%.17g exact_rl=%.17g r_err=%.17g\n",rh,rl,erh,erl,(rh+rl)-(erh+erl));
