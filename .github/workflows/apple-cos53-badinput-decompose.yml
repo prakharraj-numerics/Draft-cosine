@@ -1,0 +1,25 @@
+name: Apple COS53 bad input decomposition
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-badinput-decompose.yml'
+      - 'benchmark_support/run_apple_cos53_badinput_decompose.sh'
+
+jobs:
+  diagnostic:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decompose exact bad-input error
+        shell: bash
+        run: bash benchmark_support/run_apple_cos53_badinput_decompose.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-badinput-decompose
+          path: /tmp/badinput_decompose.txt
+          if-no-files-found: error
