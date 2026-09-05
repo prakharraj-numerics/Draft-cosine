@@ -1,0 +1,85 @@
+name: Apple vvcos same 1M max ULP
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-vvcos-same-1m-maxulp.yml'
+
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Apple vvcos on exact same 1M inputs vs MPFR256
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          [[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+          cat >/tmp/validate_vvcos.cpp <<'CPP'
+          #include <Accelerate/Accelerate.h>
+          #include <mpfr.h>
+          #include <algorithm>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <vector>
+
+          static inline uint64_t ordered_bits(double x) {
+              uint64_t u; std::memcpy(&u,&x,8);
+              return (u >> 63) ? ~u : (u | UINT64_C(0x8000000000000000));
+          }
+          static inline uint64_t ulpd(double a, double b) {
+              if (a == b) return 0;
+              uint64_t x=ordered_bits(a), y=ordered_bits(b);
+              return x>y?x-y:y-x;
+          }
+          static uint64_t mix64(uint64_t x) {
+              x^=x>>30; x*=UINT64_C(0xbf58476d1ce4e5b9); x^=x>>27;
+              x*=UINT64_C(0x94d049bb133111eb); x^=x>>31; return x;
+          }
+          static double unit52(uint64_t h) { return ((double)(h>>12)+0.5)*0x1p-52; }
+
+          int main() {
+              const int N=1000000;
+              std::vector<double> x(N), o(N);
+              const double lo[3]={0.0,1.0,1000.0}, hi[3]={1.0,500.0,10000.0};
+              for(int i=0;i<N;i++) {
+                  int c=i%6,b=c/2;
+                  double u=unit52(mix64(UINT64_C(2026090599)+(uint64_t)i*UINT64_C(0x9e3779b97f4a7c15)));
+                  double v=std::fma(hi[b]-lo[b],u,lo[b]);
+                  x[i]=(c&1)?-v:v;
+              }
+              int nn=N;
+              vvcos(o.data(),x.data(),&nn);
+
+              mpfr_t z,r; mpfr_init2(z,256); mpfr_init2(r,256);
+              uint64_t maxulp=0; int exact=0,le1=0,le2=0,worst=-1;
+              double wx=0,wo=0,wr=0;
+              for(int i=0;i<N;i++) {
+                  mpfr_set_d(z,x[i],MPFR_RNDN); mpfr_cos(r,z,MPFR_RNDN);
+                  double ref=mpfr_get_d(r,MPFR_RNDN);
+                  uint64_t u=ulpd(o[i],ref);
+                  if(u==0) exact++; if(u<=1) le1++; if(u<=2) le2++;
+                  if(u>maxulp){maxulp=u; worst=i; wx=x[i]; wo=o[i]; wr=ref;}
+              }
+              mpfr_clear(r); mpfr_clear(z);
+              std::printf("APPLE_VVCOS_1M_VALIDATE cases=%d exact=%d le1=%d le2=%d maxulp=%llu worst_i=%d worst_x=%.17g worst_out=%.17g worst_ref=%.17g reference=MPFR256\n",
+                  N,exact,le1,le2,(unsigned long long)maxulp,worst,wx,wo,wr);
+              return 0;
+          }
+          CPP
+          MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -I"$MP/include" -I"$GP/include" \
+            /tmp/validate_vvcos.cpp -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -framework Accelerate -o /tmp/validate_vvcos
+          /tmp/validate_vvcos | tee /tmp/result.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-vvcos-same-1m-maxulp
+          path: /tmp/result.txt
+          if-no-files-found: error
