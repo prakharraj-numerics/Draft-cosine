@@ -1,0 +1,117 @@
+name: Apple COS53 Apple-specific CPU efficiency
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-apple-specific-eff-20260906
+    paths:
+      - '.github/workflows/apple-cos53-apple-specific-eff.yml'
+      - 'benchmark_support/run_apple_cos53_apple_specific_eff.sh'
+
+concurrency:
+  group: apple-cos53-apple-specific-eff
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact frozen K1280 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+          cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_frozen_k1280_bench
+
+      - name: Build frozen hybrid optimized kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+
+      - name: Build Apple-specific workgroup modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_apple_specific_eff.sh build
+
+      - name: Revalidate kernel accuracy
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Benchmark Apple-specific modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
+          echo "baseline=freeze/apple-cos53-hybrid-speed-cpu-vvcos-20260906" >> "$OUT"
+          echo "candidate=parallel_workgroup + persistent event-driven threads + QoS sweep" >> "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 100000 200000 500000 1000000)
+          apple_modes=(single_user single_default single_utility wg2_ui wg2_user wg2_default wg2_utility wg3_ui wg3_user wg3_default wg3_utility)
+          select_hybrid() {
+            case "$1" in
+              100) echo single ;;
+              400|700|1200|500000|1000000) echo frozen ;;
+              3000|7500|15000|50000|100000) echo auto ;;
+              5000|29999|40001) echo adapt2 ;;
+              30000|40000|200000) echo pool3 ;;
+              *) return 1 ;;
+            esac
+          }
+          run_hybrid() {
+            n="$1"; mode="$(select_hybrid "$n")"
+            if [[ "$mode" == frozen ]]; then
+              /tmp/apple_cos53_frozen_k1280_bench candidate "$n" | sed 's/stack=candidate/stack=hybrid/'
+            else
+              bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh one "$mode" "$n" | sed "s/stack=$mode/stack=hybrid/"
+            fi
+          }
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              modes=(hybrid apple "${apple_modes[@]}")
+              shift_by=$(( (r + ${{ matrix.slot }}) % ${#modes[@]} ))
+              for ((j=0;j<${#modes[@]};j++)); do
+                idx=$(( (j + shift_by) % ${#modes[@]} ))
+                mode="${modes[$idx]}"
+                if [[ "$mode" == hybrid ]]; then
+                  run_hybrid "$n" | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+                elif [[ "$mode" == apple ]]; then
+                  bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh one apple "$n" | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+                else
+                  bash benchmark_support/run_apple_cos53_apple_specific_eff.sh one "$mode" "$n" | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+                fi
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-apple-specific-eff-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
