@@ -1,0 +1,52 @@
+name: Apple COS53 current vs Highway vs FastFlow below30K
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-current-vs-highway-fastflow-below30k.yml'
+      - 'benchmark_support/run_apple_cos53_current_vs_highwaypool_vs_fastflow_below30k.sh'
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build three variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_current_vs_highwaypool_vs_fastflow_below30k.sh verify | tee /tmp/verify.txt
+
+      - name: Benchmark current, Google Highway pool, FastFlow
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          cp /tmp/verify.txt "$OUT"
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" >> "$OUT"
+          echo "kernel=K2048 degree3 terms1 frozen=aefbe778e860ef70e64fc8d6b6d470b3575f3bbc" >> "$OUT"
+          echo "highway=1.4.0 ThreadPool(1) spin; fastflow=d476f66ab924d8d122f54b4b90aee00ef979aea8 ParallelFor(2) static passive spin" >> "$OUT"
+          sizes=(100 400 1200 3000 5000 7500 10000 15000 20000 25000 29999)
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }}) % 3 ))
+              bash benchmark_support/run_apple_cos53_current_vs_highwaypool_vs_fastflow_below30k.sh three "$n" "$order" \
+                | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-current-highway-fastflow-below30k-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
