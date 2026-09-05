@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - '.github/workflows/apple-cos53-production-1m-maxulp.yml'
+      - 'benchmark_support/run_apple_cos53_1m_maxulp.sh'
 
 jobs:
   validate:
@@ -14,137 +15,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Require Apple M1 and install deps
+      - name: Validate exactly one 1M batch against MPFR256
         shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$(uname -m)" == arm64 ]]
-          [[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]
-          brew list flint >/dev/null 2>&1 || brew install flint
-          brew list mpfr >/dev/null 2>&1 || brew install mpfr
-          brew list gmp >/dev/null 2>&1 || brew install gmp
-          brew list halide >/dev/null 2>&1 || brew install halide
-          rm -rf /tmp/highway
-          git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
-
-      - name: Extract exact current Apple baseline and frozen kernel source
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE=e114c2a749b4a7287573f577582eff2d4c9f3681
-          FREEZE=aefbe778e860ef70e64fc8d6b6d470b3575f3bbc
-          git show "$FREEZE":benchmark_support/apple_cos53_highway_benchmark.cpp > /tmp/base.cpp
-          git show "$BASE":apple_cos53_production_routing.hpp > /tmp/apple_cos53_production_routing.hpp
-          git show "$FREEZE":benchmark_support/sine_53_coeff_source.c > /tmp/src.c
-          git show "$FREEZE":benchmark_support/apple_cos53_coeff_bridge.c > /tmp/bridge.c
-          git show "$FREEZE":benchmark_support/apple_cos53_generate_constants.c > /tmp/gen.c
-          git show "$FREEZE":cosine53_apply_formula_conversion.py > /tmp/cosine53_apply_formula_conversion.py
-
-      - name: Build exact K2048 degree3 constants
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import sys
-          from pathlib import Path
-          sys.path.insert(0,'/tmp')
-          p=Path('/tmp/src.c')
-          s=p.read_text().replace('#define SF_K 12','#define SF_K 11').replace('#define SF_LUT_N ((1UL << SF_K) + 1UL)','#define SF_LUT_N 3218UL')
-          p.write_text(s)
-          p=Path('/tmp/bridge.c')
-          s=p.read_text().replace('#include "apple_cosine53_coeff_source.c"','#include "src.c"').replace('s53_coeff_create_terms(2)','s53_coeff_create_terms(1)').replace('c->poly_deg != 5','c->poly_deg != 3')
-          p.write_text(s)
-          p=Path('/tmp/gen.c')
-          p.write_text(p.read_text().replace('#define LUTN 403','#define LUTN 3218'))
-          import cosine53_apply_formula_conversion as m
-          m.patch_coeff(Path('/tmp/src.c'))
-          PY
-          FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
-          clang -O2 -DNDEBUG -I/tmp -I$FP/include -I$MP/include -I$GP/include /tmp/bridge.c /tmp/gen.c \
-            -L$FP/lib -L$MP/lib -L$GP/lib -lflint -lmpfr -lgmp -lm -o /tmp/gen
-          /tmp/gen /tmp/apple_cos53_constants_2ulp.h
-
-      - name: Generate Halide standalone runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          HP="$(brew --prefix halide)"
-          cat >/tmp/genrt.cpp <<'CPP'
-          #include <Halide.h>
-          int main() {
-              Halide::compile_standalone_runtime("/tmp/halide_runtime.a", Halide::get_host_target());
-              return 0;
-          }
-          CPP
-          clang++ -O2 -std=c++20 -I"$HP/include" /tmp/genrt.cpp -L"$HP/lib" -lHalide -o /tmp/genrt
-          /tmp/genrt
-
-      - name: Build 1M production accuracy validator
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp /tmp/base.cpp /tmp/validate.cpp
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('/tmp/validate.cpp'); s=p.read_text()
-          s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_2ulp.h"')
-          s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;').replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
-          s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
-          start=s.index('        auto c2 = hn::Mul(c0, mh);'); end=s.index('        uint64_t sm0=', start)
-          s=s[:start]+'''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''+s[end:]
-          marker='static size_t reps_for(size_t n)'
-          s=s.replace(marker,'#include "apple_cos53_production_routing.hpp"\n\n'+marker,1)
-          a=s.index('static int validate_mode()')
-          b=s.index('\n#endif', a)
-          new=r'''static int validate_mode()
-{
-    const int N=1000000;
-    std::vector<double> x(N),o(N);
-    const double lo[3]={0.0,1.0,1000.0},hi[3]={1.0,500.0,10000.0};
-    for(int i=0;i<N;i++) {
-        int c=i%6,b=c/2;
-        double u=unit52(mix64(UINT64_C(2026090599)+(uint64_t)i*UINT64_C(0x9e3779b97f4a7c15)));
-        double v=std::fma(hi[b]-lo[b],u,lo[b]);
-        x[i]=(c&1)?-v:v;
-    }
-    AppleTwoCoreHighway tc;
-    apple_cos53_production::run(tc,x.data(),o.data(),N);
-
-    mpfr_t z,r; mpfr_init2(z,256); mpfr_init2(r,256);
-    uint64_t maxulp=0; int exact=0, le1=0, le2=0; int worst=-1;
-    double worst_x=0.0, worst_out=0.0, worst_ref=0.0;
-    for(int i=0;i<N;i++) {
-        mpfr_set_d(z,x[i],MPFR_RNDN);
-        mpfr_cos(r,z,MPFR_RNDN);
-        double ref=mpfr_get_d(r,MPFR_RNDN);
-        uint64_t u=ulpd(o[i],ref);
-        if(u==0) exact++;
-        if(u<=1) le1++;
-        if(u<=2) le2++;
-        if(u>maxulp) { maxulp=u; worst=i; worst_x=x[i]; worst_out=o[i]; worst_ref=ref; }
-    }
-    mpfr_clear(r); mpfr_clear(z);
-    std::printf("APPLE_COS53_PRODUCTION_1M_VALIDATE cases=%d exact=%d le1=%d le2=%d maxulp=%llu worst_i=%d worst_x=%.17g worst_out=%.17g worst_ref=%.17g reference=MPFR256\n",
-                N,exact,le1,le2,(unsigned long long)maxulp,worst,worst_x,worst_out,worst_ref);
-    return 0;
-}
-'''
-          s=s[:a]+new+s[b:]
-          p.write_text(s)
-          PY
-          HP="$(brew --prefix halide)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
-          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
-            -DAPPLE_COS53_VALIDATE_MPFR -I/tmp -I/tmp/highway -I"$HP/include" -I"$MP/include" -I"$GP/include" \
-            /tmp/validate.cpp /tmp/halide_runtime.a -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp \
-            -framework Accelerate -pthread -ldl -o /tmp/validate
-
-      - name: Validate exactly one 1M batch
-        shell: bash
-        run: |
-          set -euo pipefail
-          /tmp/validate validate | tee /tmp/result.txt
-
+        run: bash benchmark_support/run_apple_cos53_1m_maxulp.sh
       - uses: actions/upload-artifact@v4
         with:
           name: apple-cos53-production-1m-maxulp
