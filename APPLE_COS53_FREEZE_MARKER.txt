@@ -1,0 +1,13 @@
+Apple COS53 complete production routing freeze
+Date: 2026-09-05
+
+Routing:
+- n < 30,000: existing frozen AppleTwoCoreHighway path
+- 30,000 <= n < 50,000: stable dispatch p32
+- 50,000 <= n < 100,000: stable dispatch p16
+- 100,000 <= n < 1,000,000: stable dispatch p12
+- n >= 1,000,000: stable dispatch p24
+
+Implementation: apple_cos53_production_routing.hpp
+Kernel: frozen Highway K2048 degree3 terms1 Apple COS53 path
+Intel/Xeon production untouched.
