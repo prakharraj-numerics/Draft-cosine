@@ -50,20 +50,16 @@ jobs:
           s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_2ulp.h"')
           s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;').replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
           s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
-          start=s.index('        auto c2 = hn::Mul(c0, mh);')
-          end=s.index('        uint64_t sm0=', start)
+          start=s.index('        auto c2 = hn::Mul(c0, mh);'); end=s.index('        uint64_t sm0=', start)
           cubic='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''
           s=s[:start]+cubic+s[end:]
-          # Add range adapter around the exact same Highway kernel.
           needle='class AppleTwoCoreHighway {'
           adapter='''static inline void cos53_eval_range(const double* x,double* y,size_t a,size_t b) {\n    cos53_eval_hwy(x+a,y+a,b-a);\n}\n\n'''
           s=s.replace(needle,adapter+needle,1)
-          # Add persistent GCD queue and chunked scheduler.
           marker='static size_t reps_for(size_t n)'
           inject=r'''
           class GCDHighway {
-            dispatch_queue_t q_;
-            size_t chunk_;
+            dispatch_queue_t q_; size_t chunk_;
           public:
             GCDHighway(size_t chunk,qos_class_t qos):chunk_(chunk) {
               auto attr=dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,qos,0);
@@ -77,11 +73,14 @@ jobs:
           static void run_gcd(GCDHighway &g,Buffers &b){for(int c=0;c<6;c++)g.run(b.x[c],b.y[c],b.n);}
           '''
           s=s.replace(marker,inject+'\n'+marker,1)
-          # Extend bench_mode: gcd_ui_<chunk> and gcd_init_<chunk>.
           old='''    AppleTwoCoreHighway *tc = stack=="hwy2" ? new AppleTwoCoreHighway() : nullptr;\n    auto once=[&]{ if(stack=="apple")run_apple(b); else run_hwy2(*tc,b); };'''
           new='''    AppleTwoCoreHighway *tc = stack=="hwy2" ? new AppleTwoCoreHighway() : nullptr;\n    GCDHighway *g=nullptr;\n    if(stack.rfind("gcd_ui_",0)==0) g=new GCDHighway(std::stoull(stack.substr(7)),QOS_CLASS_USER_INTERACTIVE);\n    if(stack.rfind("gcd_init_",0)==0) g=new GCDHighway(std::stoull(stack.substr(9)),QOS_CLASS_USER_INITIATED);\n    auto once=[&]{ if(stack=="apple")run_apple(b); else if(stack=="hwy2")run_hwy2(*tc,b); else run_gcd(*g,b); };'''
           assert old in s; s=s.replace(old,new,1)
           s=s.replace('    delete tc;\n    return 0;','    delete tc; delete g;\n    return 0;',1)
+          # Original harness rejects any mode except hwy2/apple. Permit the two GCD prefixes.
+          old_guard='if(stack!="hwy2" && stack!="apple") return 3;'
+          new_guard='if(stack!="hwy2" && stack!="apple" && stack.rfind("gcd_ui_",0)!=0 && stack.rfind("gcd_init_",0)!=0) return 3;'
+          assert old_guard in s; s=s.replace(old_guard,new_guard,1)
           p.write_text(s)
           PY
           COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks'
