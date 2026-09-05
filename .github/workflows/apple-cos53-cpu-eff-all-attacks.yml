@@ -1,0 +1,95 @@
+name: Apple COS53 all CPU-efficiency attacks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-k1280-cpu-eff-all-attacks-20260906
+    paths:
+      - '.github/workflows/apple-cos53-cpu-eff-all-attacks.yml'
+      - 'benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh'
+
+concurrency:
+  group: apple-cos53-cpu-eff-all-attacks
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact frozen K1280 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Reproduce the successful frozen build exactly; the frozen commit kept
+          # its stress-source generator disabled at workflow time.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+          cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_frozen_k1280_bench
+
+      - name: Build all-attacks CPU-efficiency candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+
+      - name: MPFR256 9600 plus 1M stressed accuracy
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Benchmark speed and CPU efficiency
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
+          echo "frozen=K1280 degree3 <=3ULP fastreduce commit ddbeb33c40d9f4913ebce3537d501c1396d6ef29" >> "$OUT"
+          echo "opt=split-pi-no-qpi-LUT + AoS128 coeff loads + no-j-clamps + 2x-unroll + adaptive atomic-wait helper + selectable 1/2/3-core" >> "$OUT"
+          echo "cacheline=$(sysctl -n hw.cachelinesize) l1d=$(sysctl -n hw.l1dcachesize) l2=$(sysctl -n hw.l2cachesize)" >> "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 100000 200000 500000 1000000)
+          modes=(frozen apple single adapt2 pool2 pool3 auto)
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }}) % ${#modes[@]} ))
+              for ((j=0;j<${#modes[@]};j++)); do
+                idx=$(( (j + order) % ${#modes[@]} ))
+                mode="${modes[$idx]}"
+                if [[ "$mode" == frozen ]]; then
+                  /tmp/apple_cos53_frozen_k1280_bench candidate "$n" | sed "s/stack=candidate/stack=frozen/" | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+                elif [[ "$mode" == apple ]]; then
+                  /tmp/apple_cos53_frozen_k1280_bench apple "$n" | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+                else
+                  bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh one "$mode" "$n" | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+                fi
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-cpu-eff-all-attacks-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
