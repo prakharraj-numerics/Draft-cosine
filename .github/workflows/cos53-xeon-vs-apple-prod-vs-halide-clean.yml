@@ -1,0 +1,256 @@
+name: COS53 clean Xeon vs frozen Apple production vs Halide
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/cos53-xeon-vs-apple-prod-vs-halide-clean.yml'
+
+jobs:
+  apple:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require Apple M1 and install deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          [[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]
+          brew list flint >/dev/null 2>&1 || brew install flint
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+          brew list halide >/dev/null 2>&1 || brew install halide
+          rm -rf /tmp/highway
+          git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
+
+      - name: Extract exact frozen Apple routing state
+        shell: bash
+        run: |
+          set -euo pipefail
+          FREEZE=aefbe778e860ef70e64fc8d6b6d470b3575f3bbc
+          git show "$FREEZE":benchmark_support/apple_cos53_highway_benchmark.cpp > /tmp/base.cpp
+          git show "$FREEZE":apple_cos53_production_routing.hpp > /tmp/apple_cos53_production_routing.hpp
+          git show "$FREEZE":benchmark_support/sine_53_coeff_source.c > /tmp/src.c
+          git show "$FREEZE":benchmark_support/apple_cos53_coeff_bridge.c > /tmp/bridge.c
+          git show "$FREEZE":benchmark_support/apple_cos53_generate_constants.c > /tmp/gen.c
+          git show "$FREEZE":cosine53_apply_formula_conversion.py > /tmp/cosine53_apply_formula_conversion.py
+
+      - name: Build exact frozen K2048 degree3 constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0,'/tmp')
+          p=Path('/tmp/src.c')
+          s=p.read_text().replace('#define SF_K 12','#define SF_K 11').replace('#define SF_LUT_N ((1UL << SF_K) + 1UL)','#define SF_LUT_N 3218UL')
+          p.write_text(s)
+          p=Path('/tmp/bridge.c')
+          s=p.read_text().replace('#include "apple_cosine53_coeff_source.c"','#include "src.c"').replace('s53_coeff_create_terms(2)','s53_coeff_create_terms(1)').replace('c->poly_deg != 5','c->poly_deg != 3')
+          p.write_text(s)
+          p=Path('/tmp/gen.c'); p.write_text(p.read_text().replace('#define LUTN 403','#define LUTN 3218'))
+          import cosine53_apply_formula_conversion as m
+          m.patch_coeff(Path('/tmp/src.c'))
+          PY
+          FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          clang -O2 -DNDEBUG -I/tmp -I$FP/include -I$MP/include -I$GP/include /tmp/bridge.c /tmp/gen.c \
+            -L$FP/lib -L$MP/lib -L$GP/lib -lflint -lmpfr -lgmp -lm -o /tmp/gen
+          /tmp/gen /tmp/apple_cos53_constants_2ulp.h
+
+      - name: Build isolated frozen production executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/base.cpp /tmp/prod.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/prod.cpp'); s=p.read_text()
+          s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_2ulp.h"')
+          s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;').replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
+          s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+          start=s.index('        auto c2 = hn::Mul(c0, mh);'); end=s.index('        uint64_t sm0=', start)
+          s=s[:start]+'''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''+s[end:]
+          marker='static size_t reps_for(size_t n)'
+          inject='''#include "apple_cos53_production_routing.hpp"\n\nstatic void run_production(AppleTwoCoreHighway &tc, Buffers &b) {\n    for(int c=0;c<6;c++) apple_cos53_production::run(tc,b.x[c],b.y[c],b.n);\n}\n'''
+          s=s.replace(marker,inject+'\n'+marker,1)
+          old='''    AppleTwoCoreHighway *tc = stack=="hwy2" ? new AppleTwoCoreHighway() : nullptr;\n    auto once=[&]{ if(stack=="apple")run_apple(b); else run_hwy2(*tc,b); };'''
+          new='''    AppleTwoCoreHighway *tc = (stack=="hwy2" || stack=="prod") ? new AppleTwoCoreHighway() : nullptr;\n    auto once=[&]{ if(stack=="prod") run_production(*tc,b); else if(stack=="apple") run_apple(b); else run_hwy2(*tc,b); };'''
+          assert old in s; s=s.replace(old,new,1)
+          s=s.replace('if(stack!="hwy2" && stack!="apple") return 3;','if(stack!="hwy2" && stack!="apple" && stack!="prod") return 3;',1)
+          p.write_text(s)
+          PY
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
+            -I/tmp -I/tmp/highway /tmp/prod.cpp -framework Accelerate -pthread -o /tmp/prod_bench
+
+      - name: Build isolated Halide executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/base.cpp /tmp/halide.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/halide.cpp'); s=p.read_text()
+          s=s.replace('#include <vector>','#include <vector>\n#include <HalideRuntime.h>')
+          s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_2ulp.h"')
+          s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;').replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
+          s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+          start=s.index('        auto c2 = hn::Mul(c0, mh);'); end=s.index('        uint64_t sm0=', start)
+          s=s[:start]+'''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''+s[end:]
+          marker='static size_t reps_for(size_t n)'
+          inject=r'''
+          struct PartCtx { const double* x; double* y; size_t n; size_t pieces; };
+          static int halide_piece(void*, int j, uint8_t *closure) {
+              auto *c=reinterpret_cast<PartCtx*>(closure);
+              size_t jj=(size_t)j, a=(c->n*jj)/c->pieces, b=(c->n*(jj+1))/c->pieces;
+              cos53_eval_hwy(c->x+a,c->y+a,b-a);
+              return 0;
+          }
+          static void run_halide_one(const double*x,double*y,size_t n,size_t pieces) {
+              size_t p=std::min(pieces,n); PartCtx c{x,y,n,p};
+              int rc=halide_do_par_for(nullptr,halide_piece,0,(int)p,reinterpret_cast<uint8_t*>(&c));
+              if(rc) std::abort();
+          }
+          static void run_halide_all(Buffers &b,size_t pieces) {
+              for(int c=0;c<6;c++) run_halide_one(b.x[c],b.y[c],b.n,pieces);
+          }
+          '''
+          s=s.replace(marker,inject+'\n'+marker,1)
+          old='''    AppleTwoCoreHighway *tc = stack=="hwy2" ? new AppleTwoCoreHighway() : nullptr;\n    auto once=[&]{ if(stack=="apple")run_apple(b); else run_hwy2(*tc,b); };'''
+          new='''    AppleTwoCoreHighway *tc = stack=="hwy2" ? new AppleTwoCoreHighway() : nullptr;\n    auto once=[&]{ if(stack.rfind("halide_",0)==0) run_halide_all(b,std::stoull(stack.substr(7))); else if(stack=="apple")run_apple(b); else run_hwy2(*tc,b); };'''
+          assert old in s; s=s.replace(old,new,1)
+          s=s.replace('if(stack!="hwy2" && stack!="apple") return 3;','if(stack!="hwy2" && stack!="apple" && stack.rfind("halide_",0)!=0) return 3;',1)
+          s=s.replace('    return bench_mode(stack,n);','    halide_set_num_threads(3);\n    return bench_mode(stack,n);',1)
+          p.write_text(s)
+          PY
+          HP="$(brew --prefix halide)"
+          "$HP/bin/GenRT" -o /tmp/halide_runtime.a target=host
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
+            -I/tmp -I/tmp/highway -I"$HP/include" /tmp/halide.cpp /tmp/halide_runtime.a \
+            -framework Accelerate -pthread -ldl -o /tmp/halide_bench
+
+      - name: Run isolated Apple production and Halide sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/apple-slot-${{ matrix.slot }}.txt
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
+          sizes=(100 400 1200 3000 5000 20000 30000 40000 50000 75000 100000 200000 500000 1000000)
+          for r in 1 2 3; do
+            for n in "${sizes[@]}"; do
+              /tmp/prod_bench prod "$n" | sed 's/^/PROD /' | tee -a "$OUT"
+              for p in 12 16 24 32; do
+                /tmp/halide_bench "halide_${p}" "$n" | sed "s/^/HALIDE p=${p} /" | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clean-apple-prod-halide-${{ matrix.slot }}
+          path: /tmp/out
+
+  xeon:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512
+        id: cpu
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo "SKIP_NON_6973PC model=$MODEL"
+          fi
+
+      - name: Restore Intel oneAPI cache
+        if: steps.cpu.outputs.eligible == '1'
+        id: oneapi-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install oneAPI on cache miss
+        if: steps.cpu.outputs.eligible == '1' && steps.oneapi-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: Build variable-batch Intel VML_HA benchmark
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/xeon.c <<'EOF'
+          #define _GNU_SOURCE
+          #include <mkl.h>
+          #include <math.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <time.h>
+
+          static uint64_t mix64(uint64_t x){x^=x>>30;x*=UINT64_C(0xbf58476d1ce4e5b9);x^=x>>27;x*=UINT64_C(0x94d049bb133111eb);x^=x>>31;return x;}
+          static double unit52(uint64_t h){return ((double)(h>>12)+0.5)*0x1p-52;}
+          static void fill_case(double*x,size_t n,int c){const double lo[3]={0,1,1000},hi[3]={1,500,10000};int b=c/2;uint64_t seed=UINT64_C(2026090501)+(uint64_t)c*UINT64_C(0x9e3779b97f4a7c15)+(uint64_t)n;for(size_t i=0;i<n;i++){double u=unit52(mix64(seed+(uint64_t)i*UINT64_C(0x9e3779b97f4a7c15)));double v=fma(hi[b]-lo[b],u,lo[b]);x[i]=(c&1)?-v:v;}}
+          static double now_ns(){struct timespec t;clock_gettime(CLOCK_MONOTONIC_RAW,&t);return (double)t.tv_sec*1e9+t.tv_nsec;}
+          static int cmpd(const void*a,const void*b){double x=*(const double*)a,y=*(const double*)b;return(x>y)-(x<y);}
+          static size_t reps_for(size_t n){size_t r=12000000/(n*6);if(r<2)r=2;if(r>30000)r=30000;return r;}
+          int main(int argc,char**argv){if(argc!=2)return 2;size_t n=strtoull(argv[1],0,10);double *x[6],*y[6];for(int c=0;c<6;c++){x[c]=mkl_malloc(n*sizeof(double),64);y[c]=mkl_malloc(n*sizeof(double),64);if(!x[c]||!y[c])return 3;fill_case(x[c],n,c);}MKL_INT nn=(MKL_INT)n;for(int w=0;w<20;w++)for(int c=0;c<6;c++)vmdCos(nn,x[c],y[c],VML_HA);size_t reps=reps_for(n);double s[7];volatile double sink=0;for(int t=0;t<7;t++){double a=now_ns();for(size_t r=0;r<reps;r++)for(int c=0;c<6;c++)vmdCos(nn,x[c],y[c],VML_HA);double b=now_ns();s[t]=(b-a)/((double)reps*n*6.0);sink+=y[t%6][(n*7/11)%n];}qsort(s,7,sizeof(double),cmpd);printf("XEON_RESULT n=%zu wall_ns_el=%.9f reps=%zu sink=%.17g\n",n,s[3],reps,(double)sink);for(int c=0;c<6;c++){mkl_free(x[c]);mkl_free(y[c]);}return 0;}
+          EOF
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          "$CC" -O3 -xHost -fp-model=precise -I"$MKLROOT/include" /tmp/xeon.c \
+            -L"$MKLROOT/lib" -Wl,-rpath,"$MKLROOT/lib" \
+            -Wl,--start-group -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -Wl,--end-group \
+            -lpthread -lm -ldl -o /tmp/xeon_bench
+
+      - name: Run Intel Xeon VML_HA full batch sweep
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/xeon-slot-${{ matrix.slot }}.txt
+          echo "slot=${{ matrix.slot }}" > "$OUT"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache' | tee -a "$OUT"
+          sizes=(100 400 1200 3000 5000 20000 30000 40000 50000 75000 100000 200000 500000 1000000)
+          for r in 1 2 3; do
+            for n in "${sizes[@]}"; do taskset -c 0 /tmp/xeon_bench "$n" | tee -a "$OUT"; done
+          done
+
+      - name: Upload eligible Xeon results
+        if: steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-xeon-ha-${{ matrix.slot }}
+          path: /tmp/xeon-slot-${{ matrix.slot }}.txt
+          if-no-files-found: error
