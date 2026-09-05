@@ -1,4 +1,4 @@
-name: Apple COS53 stabilized dispatch full sweep
+name: Apple COS53 stable partition region map
 on:
   workflow_dispatch:
   push:
@@ -84,15 +84,15 @@ jobs:
           p.write_text(s)
           PY
           clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks -I/tmp -I/tmp/highway /tmp/orch.cpp -framework Accelerate -pthread -o /tmp/orch
-      - name: One-go full benchmark sweep
+      - name: Dense stable partition sweep
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out; OUT=/tmp/out/results.txt
           echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
           echo "cacheline=$(sysctl -n hw.cachelinesize) l1d=$(sysctl -n hw.l1dcachesize) l2=$(sysctl -n hw.l2cachesize)" | tee -a "$OUT"
-          sizes=(100 400 1200 3000 5000 20000 30000 50000 200000)
-          modes=(apple hwy2 stable_12 stable_16 stable_24 stable_32)
+          sizes=(30000 35000 40000 50000 75000 100000 150000 200000 500000 1000000)
+          modes=(stable_12 stable_16 stable_24 stable_32)
           for r in 1 2 3 4 5; do
             for n in "${sizes[@]}"; do
               for mode in "${modes[@]}"; do /tmp/orch "$mode" "$n" | tee -a "$OUT"; done
@@ -100,5 +100,5 @@ jobs:
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-stable-full-${{ matrix.slot }}
+          name: apple-cos53-stable-region-${{ matrix.slot }}
           path: /tmp/out
