@@ -1,0 +1,73 @@
+name: Apple COS53 AMX-native polynomial vs frozen below30K
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-amx-native-poly-vs-frozen-below30k.yml'
+      - 'benchmark_support/run_apple_cos53_amx_native_poly_vs_frozen_below30k.sh'
+
+concurrency:
+  group: apple-cos53-amx-native-poly-vs-frozen-below30k
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build frozen baseline and AMX-native attack
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_amx_native_poly_vs_frozen_below30k.sh build
+
+      - name: Probe Apple AMX availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_amx_native_poly_vs_frozen_below30k.sh probe
+
+      - name: Verify AMX-native attack against MPFR256
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_amx_native_poly_vs_frozen_below30k.sh verify | tee /tmp/out/verify.txt
+
+      - name: Benchmark isolated processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/results.txt
+          cp /tmp/out/verify.txt "$OUT"
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string) os=$(sw_vers -productVersion)" >> "$OUT"
+          echo "baseline=<5K AppleTwoCoreHighway;5K-30K pthreadpool-condvar+Highway" >> "$OUT"
+          echo "candidate=manual-NEON pi reduction + no local LUT + AMX GENLUT coefficient broadcast + AMX VECFP degree9 global minimax + rare root repair; same scheduler routing" >> "$OUT"
+          sizes=(100 400 1200 3000 4999 5000 7500 10000 15000 20000 25000 29999)
+          stacks=(baseline amx)
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }}) % 2 ))
+              for j in 0 1; do
+                idx=$(( (j + order) % 2 ))
+                stack="${stacks[$idx]}"
+                bash benchmark_support/run_apple_cos53_amx_native_poly_vs_frozen_below30k.sh one "$stack" "$n" \
+                  | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-amx-native-poly-vs-frozen-below30k-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
