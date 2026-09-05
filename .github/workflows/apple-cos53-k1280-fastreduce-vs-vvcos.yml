@@ -1,0 +1,72 @@
+name: Apple COS53 K1280 fast reduction vs vvcos
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-d3-k1280-fast-reduction-3ulp-vvcos-20260906
+    paths:
+      - '.github/workflows/apple-cos53-k1280-fastreduce-vs-vvcos.yml'
+      - 'benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh'
+
+concurrency:
+  group: apple-cos53-k1280-fastreduce-vvcos
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build complete K1280 fast-reduction candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+
+      - name: MPFR256 accuracy validation and stress
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Candidate production routing vs Accelerate vvcos
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
+          echo "candidate=degree3 K1280 minimax-retuned split-reciprocal fast-reduction" >> "$OUT"
+          echo "routing=frozen Apple production router: <5K helper; 5K-30K pthreadpool-condvar-2; 30K-40K Halide32/3t; dispatch above" >> "$OUT"
+          echo "reference=Apple Accelerate vvcos" >> "$OUT"
+          echo "cacheline=$(sysctl -n hw.cachelinesize) l1d=$(sysctl -n hw.l1dcachesize) l2=$(sysctl -n hw.l2cachesize)" >> "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 100000 1000000)
+          stacks=(candidate apple)
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }}) % 2 ))
+              for j in 0 1; do
+                idx=$(( (j + order) % 2 ))
+                stack="${stacks[$idx]}"
+                bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh one "$stack" "$n" \
+                  | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-k1280-fastreduce-vvcos-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
