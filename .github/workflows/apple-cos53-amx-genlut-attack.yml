@@ -1,0 +1,75 @@
+name: Apple COS53 AMX GENLUT attack
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-amx-genlut-attack.yml'
+      - 'benchmark_support/run_apple_cos53_amx_genlut_attack.sh'
+      - 'benchmark_support/apple_cos53_amx_genlut_poly.hpp'
+
+concurrency:
+  group: apple-cos53-amx-genlut-attack
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build frozen baseline and AMX GENLUT candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_amx_genlut_attack.sh build
+
+      - name: Probe Apple AMX
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_amx_genlut_attack.sh probe
+
+      - name: Verify against MPFR and root-danger set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_amx_genlut_attack.sh verify | tee /tmp/out/verify.txt
+
+      - name: Benchmark isolated processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/results.txt
+          cp /tmp/out/verify.txt "$OUT"
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string) os=$(sw_vers -productVersion)" >> "$OUT"
+          echo "baseline=<5K AppleTwoCoreHighway;5K-30K pthreadpool-condvar+Highway" >> "$OUT"
+          echo "amxgen=NEON reduction+8piece local sin/cos+AMX GENLUT generate+lookup+VECFP combine" >> "$OUT"
+          echo "amxidx=NEON reduction+8piece local sin/cos+CPU packed index+AMX GENLUT lookup+VECFP combine" >> "$OUT"
+          sizes=(100 400 1200 3000 4999 5000 7500 10000 15000 20000 25000 29999)
+          stacks=(baseline amxgen amxidx)
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }}) % 3 ))
+              for j in 0 1 2; do
+                idx=$(( (j + order) % 3 ))
+                stack="${stacks[$idx]}"
+                bash benchmark_support/run_apple_cos53_amx_genlut_attack.sh one "$stack" "$n" \
+                  | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-amx-genlut-attack-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
