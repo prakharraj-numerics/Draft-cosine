@@ -13,15 +13,17 @@ if [[ "$MODE" == "build" ]]; then
   brew list tbb >/dev/null 2>&1 || brew install tbb
   brew list hwloc >/dev/null 2>&1 || brew install hwloc
 
-  rm -rf /tmp/pi-threadpool /tmp/qthreads /tmp/qthreads-build
+  rm -rf /tmp/pi-threadpool /tmp/pi-build /tmp/qthreads /tmp/qthreads-build /tmp/qthreads-install
   git clone --depth 1 https://github.com/PrimeIntellect-ai/threadpool.git /tmp/pi-threadpool
   git -C /tmp/pi-threadpool submodule update --init --recursive
-  git clone --depth 1 https://github.com/sandialabs/qthreads.git /tmp/qthreads
+  cmake -S /tmp/pi-threadpool -B /tmp/pi-build -DCMAKE_BUILD_TYPE=Release -DPI_THREADPOOL_BUILD_TESTS=OFF
+  cmake --build /tmp/pi-build -j 4
 
+  git clone --depth 1 https://github.com/sandialabs/qthreads.git /tmp/qthreads
   cmake -S /tmp/qthreads -B /tmp/qthreads-build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/tmp/qthreads-install \
-    -DQTHREAD_ENABLE_TESTS=OFF
+    -DBUILD_SHARED_LIBS=ON
   cmake --build /tmp/qthreads-build -j 4
   cmake --install /tmp/qthreads-build
 
@@ -142,6 +144,25 @@ static double measure_runner(Runner &runner,Buffers &b,size_t reps,double *cpu_o
     return ticks_to_ns(w1-w0)/den;
 }
 
+template<class Runner>
+static int verify_runner(const std::string& stack,Runner &runner)
+{
+    static const size_t sizes[]={64,100,400,1200,3000,5000,7500,10000,15000,20000,25000,29999};
+    size_t diff=0;
+    for(size_t n:sizes) {
+        Buffers b(n); std::vector<double> ref(n),out(n);
+        for(int c=0;c<6;c++) {
+            cos53_eval_hwy(b.x[c],ref.data(),n);
+            runner.run(b.x[c],out.data(),n);
+            size_t d=0; for(size_t i=0;i<n;i++) d += std::memcmp(&ref[i],&out[i],sizeof(double))!=0;
+            diff+=d;
+            std::printf("APPLE_COS53_4WAY_VERIFY stack=%s n=%zu case=%d bitdiff=%zu\n",stack.c_str(),n,c,d);
+        }
+    }
+    std::printf("APPLE_COS53_4WAY_VERIFY_DONE stack=%s bitdiff=%zu\n",stack.c_str(),diff);
+    return diff?21:0;
+}
+
 static int bench_one(const std::string& stack,size_t n)
 {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
@@ -158,24 +179,11 @@ static int bench_one(const std::string& stack,size_t n)
 
 static int verify_one(const std::string& stack)
 {
-    static const size_t sizes[]={64,100,400,1200,3000,5000,7500,10000,15000,20000,25000,29999};
-    size_t diff=0;
-    for(size_t n:sizes) {
-        Buffers b(n); std::vector<double> ref(n),out(n);
-        for(int c=0;c<6;c++) {
-            cos53_eval_hwy(b.x[c],ref.data(),n);
-            if(stack=="current") { AppleTwoCoreHighway r; r.run(b.x[c],out.data(),n); }
-            else if(stack=="tbb") { AppleOneTBB2 r; r.run(b.x[c],out.data(),n); }
-            else if(stack=="prime") { ApplePrime2 r; r.run(b.x[c],out.data(),n); }
-            else if(stack=="qthreads") { AppleQthreads2 r; r.run(b.x[c],out.data(),n); }
-            else return 3;
-            size_t d=0; for(size_t i=0;i<n;i++) d += std::memcmp(&ref[i],&out[i],sizeof(double))!=0;
-            diff+=d;
-            std::printf("APPLE_COS53_4WAY_VERIFY stack=%s n=%zu case=%d bitdiff=%zu\n",stack.c_str(),n,c,d);
-        }
-    }
-    std::printf("APPLE_COS53_4WAY_VERIFY_DONE stack=%s bitdiff=%zu\n",stack.c_str(),diff);
-    return diff?21:0;
+    if(stack=="current") { AppleTwoCoreHighway r; return verify_runner(stack,r); }
+    if(stack=="tbb") { AppleOneTBB2 r; return verify_runner(stack,r); }
+    if(stack=="prime") { ApplePrime2 r; return verify_runner(stack,r); }
+    if(stack=="qthreads") { AppleQthreads2 r; return verify_runner(stack,r); }
+    return 3;
 }
 '''
 s=s[:bs]+replacement+s[be:]
@@ -189,9 +197,11 @@ PY
 
   TBBP="$(brew --prefix tbb)"
   clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
-    -I/tmp -I/tmp/pi-threadpool/include -I/tmp/qthreads-install/include -I"$TBBP/include" \
-    /tmp/base.cpp /tmp/pi-threadpool/src/threadpool.cpp \
-    -L/tmp/qthreads-install/lib -L"$TBBP/lib" -lqthread -ltbb \
+    -I/tmp -I/tmp/pi-threadpool/include -I/tmp/pi-threadpool/third_party/threadpark/include \
+    -I/tmp/qthreads-install/include -I"$TBBP/include" \
+    /tmp/base.cpp /tmp/pi-build/libthreadpool.a /tmp/pi-build/third_party/threadpark/libthreadpark.a \
+    -L/tmp/qthreads-install/lib -Wl,-rpath,/tmp/qthreads-install/lib \
+    -L"$TBBP/lib" -lqthread -ltbb -lhwloc \
     -framework Accelerate -pthread -ldl -o /tmp/apple_cos53_4way
   exit 0
 fi
