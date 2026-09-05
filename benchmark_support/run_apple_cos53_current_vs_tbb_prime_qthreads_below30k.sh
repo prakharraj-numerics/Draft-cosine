@@ -17,10 +17,10 @@ if [[ "$MODE" == "build" ]]; then
 
   git clone --depth 1 https://github.com/PrimeIntellect-ai/threadpool.git /tmp/pi-threadpool
   git -C /tmp/pi-threadpool submodule update --init --recursive
-  # macOS SDK exports a global constant named `pi`; rename PrimeIntellect's
-  # namespace locally for this benchmark, without changing library behavior.
-  sed -i '' 's/namespace pi::threadpool/namespace pithreadpool_apple::threadpool/g' /tmp/pi-threadpool/include/pithreadpool/threadpool.hpp
-  sed -i '' 's/namespace pi::threadpool/namespace pithreadpool_apple::threadpool/g' /tmp/pi-threadpool/src/threadpool.cpp
+  # macOS SDK exports a global constant named `pi`; locally rename every
+  # PrimeIntellect-qualified namespace reference for this benchmark build.
+  sed -i '' 's/pi::threadpool/pithreadpool_apple::threadpool/g' /tmp/pi-threadpool/include/pithreadpool/threadpool.hpp
+  sed -i '' 's/pi::threadpool/pithreadpool_apple::threadpool/g' /tmp/pi-threadpool/src/threadpool.cpp
   cmake -S /tmp/pi-threadpool -B /tmp/pi-build -DCMAKE_BUILD_TYPE=Release -DPI_THREADPOOL_BUILD_TESTS=OFF
   cmake --build /tmp/pi-build -j 4
 
