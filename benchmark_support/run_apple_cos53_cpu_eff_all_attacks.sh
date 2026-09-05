@@ -149,6 +149,14 @@ __attribute__((always_inline)) static inline void opt_pair(const double* x,doubl
     uint64x2_t outsign=vshlq_n_u64(parity,63);
     p=vreinterpretq_f64_u64(veorq_u64(vreinterpretq_u64_f64(p),outsign));
     vst1q_f64(y,p);
+
+    // Root-only accuracy repair. j>=2009 means |r| is within ~1.3e-3 of
+    // pi/2. This region is vanishingly rare for ordinary inputs but ULP
+    // sensitivity is extreme there, so use Apple's scalar libm only for the
+    // affected lane(s). The common path remains fully vectorized and retains
+    // the split-pi/no-qpi-LUT reduction.
+    if (__builtin_expect(j0 >= 2009, 0)) y[0]=std::cos(x[0]);
+    if (__builtin_expect(j1 >= 2009, 0)) y[1]=std::cos(x[1]);
 }
 
 static inline void opt_cos53_eval(const double* x,double* y,size_t n)
