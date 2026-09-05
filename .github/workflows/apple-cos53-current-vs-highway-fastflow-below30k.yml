@@ -44,11 +44,16 @@ jobs:
           echo "kernel=K2048 degree3 terms1 frozen=aefbe778e860ef70e64fc8d6b6d470b3575f3bbc" >> "$OUT"
           echo "highway=1.4.0 ThreadPool(1) spin; fastflow=d476f66ab924d8d122f54b4b90aee00ef979aea8 ParallelFor(2) static passive spin" >> "$OUT"
           sizes=(100 400 1200 3000 5000 7500 10000 15000 20000 25000 29999)
+          stacks=(current highway fastflow)
           for r in 0 1 2; do
             for n in "${sizes[@]}"; do
               order=$(( (r + ${{ matrix.slot }}) % 3 ))
-              /tmp/apple_cos53_3way three "$n" "$order" \
-                | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+              for j in 0 1 2; do
+                idx=$(( (j + order) % 3 ))
+                stack="${stacks[$idx]}"
+                /tmp/apple_cos53_3way one "$stack" "$n" \
+                  | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+              done
             done
           done
 
