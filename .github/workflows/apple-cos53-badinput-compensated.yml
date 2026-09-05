@@ -1,0 +1,25 @@
+name: Apple COS53 bad input compensated low-word
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-badinput-compensated.yml'
+      - 'benchmark_support/run_apple_cos53_badinput_compensated.sh'
+
+jobs:
+  diagnostic:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compile and test exact bad input
+        shell: bash
+        run: bash benchmark_support/run_apple_cos53_badinput_compensated.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-badinput-compensated
+          path: /tmp/badinput_compensated.txt
+          if-no-files-found: error
