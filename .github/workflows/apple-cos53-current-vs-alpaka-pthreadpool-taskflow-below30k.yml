@@ -29,6 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           brew list boost >/dev/null 2>&1 || brew install boost
+          export CPLUS_INCLUDE_PATH="$(brew --prefix boost)/include:${CPLUS_INCLUDE_PATH:-}"
           bash benchmark_support/run_apple_cos53_current_vs_alpaka_pthreadpool_taskflow_below30k.sh build
 
       - name: Verify bitwise-equivalent outputs
