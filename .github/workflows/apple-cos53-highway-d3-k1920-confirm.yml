@@ -1,0 +1,192 @@
+name: Apple COS53 Highway degree3 K1920 confirmation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apple-cos53-highway-d3-k1920-confirm.yml'
+
+jobs:
+  benchmark:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slot: [1,2,3,4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require native Apple M1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          CPU="$(sysctl -n machdep.cpu.brand_string)"
+          echo "CPU=$CPU slot=${{ matrix.slot }}"
+          [[ "$CPU" == *"Apple M1"* ]]
+
+      - name: Install deps and Highway
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list flint >/dev/null 2>&1 || brew install flint
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+          git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
+          git -C /tmp/highway rev-parse HEAD > /tmp/highway_commit.txt
+
+      - name: Stage frozen K2048 and K1920 degree3 candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/sine_53_coeff_source.c /tmp/src2.c
+          cp benchmark_support/sine_53_coeff_source.c /tmp/srcc.c
+          cp benchmark_support/apple_cos53_coeff_bridge.c /tmp/bridge2.c
+          cp benchmark_support/apple_cos53_coeff_bridge.c /tmp/bridgec.c
+          cp benchmark_support/apple_cos53_generate_constants.c /tmp/gen2.c
+          cp benchmark_support/apple_cos53_generate_constants.c /tmp/genc.c
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/hwy2.cpp
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/hwyc.cpp
+
+          python3 - <<'PY'
+          from pathlib import Path
+          from fractions import Fraction
+          import math
+          K=1920
+          N=math.floor((math.pi/2)*K + 0.5)+1
+          assert N==3017
+
+          def patch_src(path, grid, lutn):
+              p=Path(path); s=p.read_text()
+              s=s.replace('#define SF_K 12',f'#define SF_GRID {grid}')
+              s=s.replace('#define SF_LUT_N ((1UL << SF_K) + 1UL)',f'#define SF_LUT_N {lutn}UL')
+              old='st |= nfloat_mul_2exp_si(delta, delta, -SF_K, b->nctx);'
+              assert old in s
+              s=s.replace(old,f'st |= nfloat_div_ui(delta, delta, {grid}UL, b->nctx);')
+              p.write_text(s)
+          def patch_bridge(path,inc):
+              p=Path(path); s=p.read_text().replace('#include "apple_cosine53_coeff_source.c"',f'#include "{inc}"')
+              s=s.replace('s53_coeff_create_terms(2)','s53_coeff_create_terms(1)').replace('c->poly_deg != 5','c->poly_deg != 3')
+              p.write_text(s)
+          def patch_gen(path,n):
+              p=Path(path); p.write_text(p.read_text().replace('#define LUTN 403',f'#define LUTN {n}'))
+
+          patch_src('/tmp/src2.c',2048,3218); patch_bridge('/tmp/bridge2.c','src2.c'); patch_gen('/tmp/gen2.c',3218)
+          patch_src('/tmp/srcc.c',K,N); patch_bridge('/tmp/bridgec.c','srcc.c'); patch_gen('/tmp/genc.c',N)
+
+          oldpoly='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto c4 = hn::Mul(c0, c24v);\n        auto c5 = hn::Mul(c1, c120v);\n\n        auto p = hn::MulAdd(c5, delta, c4);\n        p = hn::MulAdd(p, delta, c3);\n        p = hn::MulAdd(p, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+          newpoly='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+          def common(path,header,grid):
+              p=Path(path); s=p.read_text()
+              s=s.replace('#include "apple_cos53_constants.h"',f'#include "{header}"')
+              s=s.replace('static constexpr double KGRID = 256.0;',f'static constexpr double KGRID = {grid}.0;')
+              s=s.replace('static constexpr double INVK = 1.0 / 256.0;',f'static constexpr double INVK = 1.0 / {grid}.0;')
+              s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+              assert oldpoly in s
+              p.write_text(s.replace(oldpoly,newpoly,1))
+          common('/tmp/hwy2.cpp','apple_cos53_constants_2ulp.h',2048)
+          common('/tmp/hwyc.cpp','apple_cos53_constants_candidate.h',K)
+
+          hi=float(Fraction(1,K)); lo=float(Fraction(1,K)-Fraction.from_float(hi))
+          p=Path('/tmp/hwyc.cpp'); s=p.read_text()
+          needle='    const auto vik = hn::Set(d, INVK);'; assert needle in s
+          s=s.replace(needle,needle+f'\n    const auto nvik = hn::Set(d, {-hi!r});\n    const auto nviklo = hn::Set(d, {(-lo).hex()});',1)
+          olddelta='auto delta = hn::Add(hn::Sub(rh, hn::Mul(jd, vik)), rl);'; assert olddelta in s
+          s=s.replace(olddelta,'auto delta = hn::MulAdd(jd, nvik, rh);\n        delta = hn::MulAdd(jd, nviklo, delta);\n        delta = hn::Add(delta, rl);',1)
+          p.write_text(s)
+          print('K',K,'LUTN',N,'INVHI',hi.hex(),'INVLO',lo.hex())
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import cosine53_apply_formula_conversion as m
+          m.patch_coeff(Path('/tmp/src2.c')); m.patch_coeff(Path('/tmp/srcc.c'))
+          PY
+
+      - name: Generate constants and retune K1920 offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          CFLAGS="-O2 -DNDEBUG -I/tmp -I$FP/include -I$MP/include -I$GP/include"
+          LIBS="-L$FP/lib -L$MP/lib -L$GP/lib -lflint -lmpfr -lgmp -lm"
+          clang $CFLAGS /tmp/bridge2.c /tmp/gen2.c $LIBS -o /tmp/gen2
+          clang $CFLAGS /tmp/bridgec.c /tmp/genc.c $LIBS -o /tmp/genc
+          /tmp/gen2 /tmp/apple_cos53_constants_2ulp.h
+          /tmp/genc /tmp/apple_cos53_constants_candidate.h
+
+          python3 - <<'PY'
+          from pathlib import Path
+          from fractions import Fraction
+          import re
+          K=1920; h=Fraction(1,2*K); h2=h*h; h4=h2*h2
+          A0=Fraction(1)-h4/Fraction(192); B1=Fraction(1)-h4/Fraction(384)
+          A2=-Fraction(1,2)+h2/Fraction(24); B3=-Fraction(1,6)+h2/Fraction(96)
+          ar=A2/A0; br=B3/B1
+          p=Path('/tmp/apple_cos53_constants_candidate.h'); s=p.read_text()
+          def scale(text,name,factor):
+              pat=rf'(static const double {name}\[APPLE_COS53_LUTN\] = \{{\s*)(.*?)(\}};)'
+              m=re.search(pat,text,re.S); assert m,name
+              body=m.group(2)
+              def rr(mm): return float(Fraction.from_float(float.fromhex(mm.group(0)))*factor).hex()
+              body=re.sub(r'-?0x[0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?p[+-]?\d+',rr,body)
+              return text[:m.start(2)]+body+text[m.end(2):]
+          s=scale(s,'apple_cos53_c0',A0); s=scale(s,'apple_cos53_c1',B1); p.write_text(s)
+          q=Path('/tmp/hwyc.cpp'); t=q.read_text()
+          t=t.replace('    const auto mh = hn::Set(d, -0.5);',f'    const auto mh = hn::Set(d, {float(ar).hex()});')
+          t=t.replace('    const auto m6 = hn::Set(d, -1.0/6.0);',f'    const auto m6 = hn::Set(d, {float(br).hex()});')
+          q.write_text(t)
+          PY
+          shasum -a 256 /tmp/apple_cos53_constants_2ulp.h /tmp/apple_cos53_constants_candidate.h > /tmp/constants.sha256
+
+      - name: Build and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off'
+          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/hwy2.cpp -framework Accelerate -pthread -o /tmp/hwy2
+          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/hwyc.cpp -framework Accelerate -pthread -o /tmp/hwyc
+          clang++ $COMMON -DAPPLE_COS53_VALIDATE_MPFR -I/tmp -I/tmp/highway -I"$MP/include" -I"$GP/include" /tmp/hwy2.cpp \
+            -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/hwy2v
+          clang++ $COMMON -DAPPLE_COS53_VALIDATE_MPFR -I/tmp -I/tmp/highway -I"$MP/include" -I"$GP/include" /tmp/hwyc.cpp \
+            -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/hwycv
+          mkdir -p /tmp/out
+          /tmp/hwy2v validate | tee /tmp/out/accuracy_2ulp.txt
+          /tmp/hwycv validate | tee /tmp/out/accuracy_k1920.txt
+          M="$(sed -n 's/.*hwy_maxulp=\([0-9][0-9]*\).*/\1/p' /tmp/out/accuracy_k1920.txt | tail -1)"
+          test -n "$M" && test "$M" -le 3
+
+      - name: Full batch benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/results.txt
+          echo "APPLE_ENV cpu=$(sysctl -n machdep.cpu.brand_string) slot=${{ matrix.slot }} helper=AppleTwoCore candidate=Highway_degree3_K1920_split_reciprocal_LUTN3017 baseline=Highway_degree3_K2048_LUTN3218 comparator=vvcos" | tee "$OUT"
+          sizes=(100 400 1200 3000 5000 20000 50000 200000)
+          for n in "${sizes[@]}"; do
+            case $((n%3)) in
+              0) order=(apple base cand);;
+              1) order=(base cand apple);;
+              2) order=(cand apple base);;
+            esac
+            for s in "${order[@]}"; do
+              case "$s" in
+                apple) /tmp/hwyc apple "$n" | sed 's/stack=apple/stack=vvcos/' | tee -a "$OUT";;
+                base) /tmp/hwy2 hwy2 "$n" | sed 's/stack=hwy2/stack=frozen_2ulp/' | tee -a "$OUT";;
+                cand) /tmp/hwyc hwy2 "$n" | sed 's/stack=hwy2/stack=candidate_k1920/' | tee -a "$OUT";;
+              esac
+            done
+          done
+          cp /tmp/constants.sha256 /tmp/out/constants.sha256
+          cp /tmp/highway_commit.txt /tmp/out/highway_commit.txt
+          printf 'degree=3\ngrid=1920\nlutn=3017\nsplit_reciprocal=true\nmax_ulp_gate=3\n' > /tmp/out/config.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-highway-d3-k1920-confirm-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
