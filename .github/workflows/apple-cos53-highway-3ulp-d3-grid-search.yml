@@ -1,0 +1,206 @@
+name: Apple COS53 Highway degree3 <=3ULP grid search
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apple-cos53-highway-3ulp-d3-grid-search.yml'
+
+jobs:
+  search:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        grid: [1152, 1280, 1408, 1536, 1664, 1792, 1920]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require native Apple M1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          CPU="$(sysctl -n machdep.cpu.brand_string)"
+          echo "CPU=$CPU grid=${{ matrix.grid }}"
+          [[ "$CPU" == *"Apple M1"* ]]
+
+      - name: Install deps and Highway 1.4.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list flint >/dev/null 2>&1 || brew install flint
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+          git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
+
+      - name: Stage frozen 2ULP and candidate degree3 sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          K=${{ matrix.grid }}
+          LUTN="$(python3 - <<PY
+          import math
+          K=$K
+          print(math.floor((math.pi/2)*K + 0.5) + 1)
+          PY
+          )"
+          echo "GRID=$K" >> "$GITHUB_ENV"
+          echo "LUTN=$LUTN" >> "$GITHUB_ENV"
+          echo "grid=$K lutn=$LUTN"
+
+          cp benchmark_support/sine_53_coeff_source.c /tmp/src2.c
+          cp benchmark_support/sine_53_coeff_source.c /tmp/srcc.c
+          cp benchmark_support/apple_cos53_coeff_bridge.c /tmp/bridge2.c
+          cp benchmark_support/apple_cos53_coeff_bridge.c /tmp/bridgec.c
+          cp benchmark_support/apple_cos53_generate_constants.c /tmp/gen2.c
+          cp benchmark_support/apple_cos53_generate_constants.c /tmp/genc.c
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/hwy2.cpp
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/hwyc.cpp
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          K=int(os.environ.get('GRID','${{ matrix.grid }}'))
+          import math
+          N=math.floor((math.pi/2)*K + 0.5)+1
+
+          def patch_src(path, grid, lutn):
+              p=Path(path); s=p.read_text()
+              s=s.replace('#define SF_K 12',f'#define SF_GRID {grid}')
+              s=s.replace('#define SF_LUT_N ((1UL << SF_K) + 1UL)',f'#define SF_LUT_N {lutn}UL')
+              old='st |= nfloat_mul_2exp_si(delta, delta, -SF_K, b->nctx);'
+              assert old in s
+              s=s.replace(old,f'st |= nfloat_div_ui(delta, delta, {grid}UL, b->nctx);')
+              p.write_text(s)
+
+          def patch_bridge(path, inc):
+              p=Path(path); s=p.read_text()
+              s=s.replace('#include "apple_cosine53_coeff_source.c"',f'#include "{inc}"')
+              s=s.replace('s53_coeff_create_terms(2)','s53_coeff_create_terms(1)')
+              s=s.replace('c->poly_deg != 5','c->poly_deg != 3')
+              p.write_text(s)
+
+          def patch_gen(path,n):
+              p=Path(path); s=p.read_text().replace('#define LUTN 403',f'#define LUTN {n}')
+              p.write_text(s)
+
+          # Frozen degree3 K2048.
+          patch_src('/tmp/src2.c',2048,3218)
+          patch_bridge('/tmp/bridge2.c','src2.c')
+          patch_gen('/tmp/gen2.c',3218)
+
+          # Candidate degree3 arbitrary K.
+          patch_src('/tmp/srcc.c',K,N)
+          patch_bridge('/tmp/bridgec.c','srcc.c')
+          patch_gen('/tmp/genc.c',N)
+
+          old='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto c4 = hn::Mul(c0, c24v);\n        auto c5 = hn::Mul(c1, c120v);\n\n        auto p = hn::MulAdd(c5, delta, c4);\n        p = hn::MulAdd(p, delta, c3);\n        p = hn::MulAdd(p, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+          new='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+
+          p=Path('/tmp/hwy2.cpp'); s=p.read_text()
+          s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_2ulp.h"')
+          s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;')
+          s=s.replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
+          s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+
+          p=Path('/tmp/hwyc.cpp'); s=p.read_text()
+          s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_candidate.h"')
+          s=s.replace('static constexpr double KGRID = 256.0;',f'static constexpr double KGRID = {K}.0;')
+          s=s.replace('static constexpr double INVK = 1.0 / 256.0;',f'static constexpr double INVK = 1.0 / {K}.0;')
+          s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import cosine53_apply_formula_conversion as m
+          m.patch_coeff(Path('/tmp/src2.c'))
+          m.patch_coeff(Path('/tmp/srcc.c'))
+          PY
+
+      - name: Generate constants and minimax-retune candidate offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          CFLAGS="-O2 -DNDEBUG -I/tmp -I$FP/include -I$MP/include -I$GP/include"
+          LIBS="-L$FP/lib -L$MP/lib -L$GP/lib -lflint -lmpfr -lgmp -lm"
+          clang $CFLAGS /tmp/bridge2.c /tmp/gen2.c $LIBS -o /tmp/gen2
+          clang $CFLAGS /tmp/bridgec.c /tmp/genc.c $LIBS -o /tmp/genc
+          /tmp/gen2 /tmp/apple_cos53_constants_2ulp.h
+          /tmp/genc /tmp/apple_cos53_constants_candidate.h
+
+          python3 - <<'PY'
+          from pathlib import Path
+          from fractions import Fraction
+          import os,re
+          K=int(os.environ['GRID'])
+          h=Fraction(1,2*K)
+          h2=h*h; h4=h2*h2
+          A0=Fraction(1)-h4/Fraction(192)
+          B1=Fraction(1)-h4/Fraction(384)
+          A2=-Fraction(1,2)+h2/Fraction(24)
+          B3=-Fraction(1,6)+h2/Fraction(96)
+          ar=A2/A0; br=B3/B1
+
+          p=Path('/tmp/apple_cos53_constants_candidate.h'); s=p.read_text()
+          def scale_array(text,name,factor):
+              pat=rf'(static const double {name}\[APPLE_COS53_LUTN\] = \{{\s*)(.*?)(\}};)'
+              m=re.search(pat,text,re.S); assert m,name
+              body=m.group(2)
+              def repl(mm):
+                  x=float.fromhex(mm.group(0)); return float(Fraction.from_float(x)*factor).hex()
+              body=re.sub(r'-?0x[0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?p[+-]?\d+',repl,body)
+              return text[:m.start(2)]+body+text[m.end(2):]
+          s=scale_array(s,'apple_cos53_c0',A0)
+          s=scale_array(s,'apple_cos53_c1',B1)
+          p.write_text(s)
+
+          q=Path('/tmp/hwyc.cpp'); t=q.read_text()
+          t=t.replace('    const auto mh = hn::Set(d, -0.5);',f'    const auto mh = hn::Set(d, {float(ar).hex()});')
+          t=t.replace('    const auto m6 = hn::Set(d, -1.0/6.0);',f'    const auto m6 = hn::Set(d, {float(br).hex()});')
+          q.write_text(t)
+          print('RETUNE',K,'A0',float(A0).hex(),'B1',float(B1).hex(),'A2/A0',float(ar).hex(),'B3/B1',float(br).hex())
+          PY
+
+      - name: Build and validate candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off'
+          clang++ $COMMON -DAPPLE_COS53_VALIDATE_MPFR -I/tmp -I/tmp/highway -I"$MP/include" -I"$GP/include" /tmp/hwyc.cpp \
+            -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/hwycv
+          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/hwyc.cpp -framework Accelerate -pthread -o /tmp/hwyc
+          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/hwy2.cpp -framework Accelerate -pthread -o /tmp/hwy2
+          mkdir -p /tmp/out
+          /tmp/hwycv validate | tee /tmp/out/accuracy.txt
+          MAXULP="$(sed -n 's/.*hwy_maxulp=\([0-9][0-9]*\).*/\1/p' /tmp/out/accuracy.txt | tail -1)"
+          echo "MAXULP=$MAXULP" | tee /tmp/out/verdict.txt
+          if [ -n "$MAXULP" ] && [ "$MAXULP" -le 3 ]; then
+            echo PASS_3ULP | tee -a /tmp/out/verdict.txt
+          else
+            echo FAIL_3ULP | tee -a /tmp/out/verdict.txt
+            exit 0
+          fi
+
+          {
+            echo "grid=$GRID lutn=$LUTN"
+            /tmp/hwyc hwy2 50000 | sed 's/stack=hwy2/stack=candidate_d3/'
+            /tmp/hwy2 hwy2 50000 | sed 's/stack=hwy2/stack=frozen_2ulp/'
+            /tmp/hwyc apple 50000 | sed 's/stack=apple/stack=vvcos/'
+          } | tee /tmp/out/bench50k.txt
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-d3-grid-${{ matrix.grid }}
+          path: /tmp/out
+          if-no-files-found: error
