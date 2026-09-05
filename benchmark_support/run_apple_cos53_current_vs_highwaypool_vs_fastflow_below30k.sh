@@ -8,10 +8,19 @@ brew list flint >/dev/null 2>&1 || brew install flint
 brew list mpfr >/dev/null 2>&1 || brew install mpfr
 brew list gmp >/dev/null 2>&1 || brew install gmp
 
-rm -rf /tmp/highway /tmp/fastflow
+rm -rf /tmp/highway /tmp/highway-build /tmp/fastflow
 git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
 git clone https://github.com/fastflow/fastflow.git /tmp/fastflow
 git -C /tmp/fastflow checkout d476f66ab924d8d122f54b4b90aee00ef979aea8
+
+# ThreadPool is part of Highway's compiled contrib library, not purely header-only.
+cmake -S /tmp/highway -B /tmp/highway-build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DHWY_ENABLE_TESTS=OFF \
+  -DHWY_ENABLE_EXAMPLES=OFF \
+  -DHWY_ENABLE_CONTRIB=ON >/tmp/highway-cmake.log
+cmake --build /tmp/highway-build --target hwy_contrib -j2 >>/tmp/highway-cmake.log
 
 FREEZE=aefbe778e860ef70e64fc8d6b6d470b3575f3bbc
 git show "$FREEZE":benchmark_support/apple_cos53_highway_benchmark.cpp > /tmp/base.cpp
@@ -52,7 +61,6 @@ start=s.index('        auto c2 = hn::Mul(c0, mh);')
 end=s.index('        uint64_t sm0=',start)
 s=s[:start]+'''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''+s[end:]
 
-# Insert two scheduler variants immediately after current AppleTwoCoreHighway.
 needle='''};\n\nstatic uint64_t mix64(uint64_t x)'''
 insert=r'''};
 
@@ -100,8 +108,6 @@ new=old+'''static void run_highwaypool(AppleHighwayThreadPool2 &tc,Buffers &b)\n
 assert old in s
 s=s.replace(old,new,1)
 
-# Replace benchmark mode with a three-way mode. One process owns all persistent
-# schedulers; order rotates to reduce hosted-runner drift.
 bs=s.index('static int bench_mode(')
 be=s.index('\n#ifdef APPLE_COS53_VALIDATE_MPFR',bs)
 replacement=r'''static double measure_stack(const char* stack,
@@ -182,15 +188,19 @@ PY
 
 clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
   -I/tmp -I/tmp/highway -I/tmp/fastflow \
-  /tmp/base.cpp /tmp/highway/hwy/contrib/thread_pool/thread_pool.cc \
+  /tmp/base.cpp -L/tmp/highway-build -lhwy_contrib -lhwy \
   -framework Accelerate -pthread -ldl -o /tmp/apple_cos53_3way
 
+if [[ "${1:-}" == "build" ]]; then
+  echo "APPLE_COS53_3WAY_BUILD_OK"
+  exit 0
+fi
 if [[ "${1:-}" == "verify" ]]; then
   exec /tmp/apple_cos53_3way verify-three
 fi
 
 if [[ "${1:-}" != "three" || $# -ne 3 ]]; then
-  echo "usage: $0 verify | three N ORDER" >&2
+  echo "usage: $0 build | verify | three N ORDER" >&2
   exit 2
 fi
 exec /tmp/apple_cos53_3way "$@"
