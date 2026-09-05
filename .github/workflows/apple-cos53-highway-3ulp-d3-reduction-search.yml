@@ -1,0 +1,144 @@
+name: Apple COS53 Highway degree3 3ULP reduction search
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apple-cos53-highway-3ulp-d3-reduction-search.yml'
+
+jobs:
+  search:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        variant: [collapse_low, fast_twosum, simple]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require Apple M1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          CPU="$(sysctl -n machdep.cpu.brand_string)"
+          echo "CPU=$CPU variant=${{ matrix.variant }}"
+          [[ "$CPU" == *"Apple M1"* ]]
+
+      - name: Install deps and Highway
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list flint >/dev/null 2>&1 || brew install flint
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+          git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
+
+      - name: Stage frozen degree3 K2048 and reduction candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/sine_53_coeff_source.c /tmp/src.c
+          cp benchmark_support/apple_cos53_coeff_bridge.c /tmp/bridge.c
+          cp benchmark_support/apple_cos53_generate_constants.c /tmp/gen.c
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/base.cpp
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/cand.cpp
+
+          python3 - <<'PY'
+          from pathlib import Path
+          variant='${{ matrix.variant }}'
+
+          p=Path('/tmp/src.c'); s=p.read_text()
+          s=s.replace('#define SF_K 12','#define SF_K 11')
+          s=s.replace('#define SF_LUT_N ((1UL << SF_K) + 1UL)','#define SF_LUT_N 3218UL')
+          p.write_text(s)
+
+          p=Path('/tmp/bridge.c'); s=p.read_text()
+          s=s.replace('#include "apple_cosine53_coeff_source.c"','#include "src.c"')
+          s=s.replace('s53_coeff_create_terms(2)','s53_coeff_create_terms(1)')
+          s=s.replace('c->poly_deg != 5','c->poly_deg != 3')
+          p.write_text(s)
+
+          p=Path('/tmp/gen.c'); p.write_text(p.read_text().replace('#define LUTN 403','#define LUTN 3218'))
+
+          oldpoly='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto c4 = hn::Mul(c0, c24v);\n        auto c5 = hn::Mul(c1, c120v);\n\n        auto p = hn::MulAdd(c5, delta, c4);\n        p = hn::MulAdd(p, delta, c3);\n        p = hn::MulAdd(p, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+          newpoly='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+
+          def common(path, header):
+              p=Path(path); s=p.read_text()
+              s=s.replace('#include "apple_cos53_constants.h"',f'#include "{header}"')
+              s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;')
+              s=s.replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
+              s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+              assert oldpoly in s
+              s=s.replace(oldpoly,newpoly,1)
+              p.write_text(s)
+
+          common('/tmp/base.cpp','apple_cos53_constants_2ulp.h')
+          common('/tmp/cand.cpp','apple_cos53_constants_2ulp.h')
+
+          p=Path('/tmp/cand.cpp'); s=p.read_text()
+          old='''        auto s = hn::Sub(ax, ph);\n        auto b = hn::Neg(pl);\n\n        // Exact TwoSum, matching the current Apple NEON path operation-for-operation.\n        auto rh = hn::Add(s, b);\n        auto bv = hn::Sub(rh, s);\n        auto av = hn::Sub(rh, bv);\n        auto br = hn::Sub(b, bv);\n        auto ar = hn::Sub(s, av);\n        auto rl = hn::Add(ar, br);\n\n        auto rs = hn::Add(rh, rl);\n        auto neg = hn::Lt(rs, zero);\n        rh = hn::IfThenElse(neg, hn::Neg(rh), rh);\n        rl = hn::IfThenElse(neg, hn::Neg(rl), rl);\n        auto r = hn::Add(rh, rl);'''
+          assert old in s
+
+          if variant=='collapse_low':
+              new='''        auto s = hn::Sub(ax, ph);\n        auto b = hn::Neg(pl);\n\n        auto rh = hn::Add(s, b);\n        auto bv = hn::Sub(rh, s);\n        auto av = hn::Sub(rh, bv);\n        auto br = hn::Sub(b, bv);\n        auto ar = hn::Sub(s, av);\n        auto rl = hn::Add(ar, br);\n        auto r = hn::Abs(hn::Add(rh, rl));'''
+              s=s.replace(old,new,1)
+              olddelta='auto delta = hn::Add(hn::Sub(rh, hn::Mul(jd, vik)), rl);'
+              assert olddelta in s
+              s=s.replace(olddelta,'auto delta = hn::Sub(r, hn::Mul(jd, vik));',1)
+          elif variant=='fast_twosum':
+              new='''        auto s = hn::Sub(ax, ph);\n        auto b = hn::Neg(pl);\n        auto rh = hn::Add(s, b);\n        auto rl = hn::Sub(b, hn::Sub(rh, s));\n        auto rs = hn::Add(rh, rl);\n        auto neg = hn::Lt(rs, zero);\n        rh = hn::IfThenElse(neg, hn::Neg(rh), rh);\n        rl = hn::IfThenElse(neg, hn::Neg(rl), rl);\n        auto r = hn::Add(rh, rl);'''
+              s=s.replace(old,new,1)
+          elif variant=='simple':
+              new='''        auto s = hn::Sub(ax, ph);\n        auto r = hn::Abs(hn::Sub(s, pl));'''
+              s=s.replace(old,new,1)
+              olddelta='auto delta = hn::Add(hn::Sub(rh, hn::Mul(jd, vik)), rl);'
+              assert olddelta in s
+              s=s.replace(olddelta,'auto delta = hn::Sub(r, hn::Mul(jd, vik));',1)
+          else:
+              raise SystemExit(variant)
+          p.write_text(s)
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import cosine53_apply_formula_conversion as m
+          m.patch_coeff(Path('/tmp/src.c'))
+          PY
+
+      - name: Generate constants, validate, and benchmark 50K
+        shell: bash
+        run: |
+          set -euo pipefail
+          FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          clang -O2 -DNDEBUG -I/tmp -I"$FP/include" -I"$MP/include" -I"$GP/include" /tmp/bridge.c /tmp/gen.c \
+            -L"$FP/lib" -L"$MP/lib" -L"$GP/lib" -lflint -lmpfr -lgmp -lm -o /tmp/gen
+          /tmp/gen /tmp/apple_cos53_constants_2ulp.h
+          COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off'
+          clang++ $COMMON -DAPPLE_COS53_VALIDATE_MPFR -I/tmp -I/tmp/highway -I"$MP/include" -I"$GP/include" /tmp/cand.cpp \
+            -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/candv
+          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/cand.cpp -framework Accelerate -pthread -o /tmp/cand
+          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/base.cpp -framework Accelerate -pthread -o /tmp/base
+          mkdir -p /tmp/out
+          /tmp/candv validate | tee /tmp/out/accuracy.txt
+          M="$(sed -n 's/.*hwy_maxulp=\([0-9][0-9]*\).*/\1/p' /tmp/out/accuracy.txt | tail -1)"
+          echo "variant=${{ matrix.variant }} maxulp=$M" | tee /tmp/out/verdict.txt
+          if [ -n "$M" ] && [ "$M" -le 3 ]; then
+            echo PASS_3ULP | tee -a /tmp/out/verdict.txt
+            {
+              /tmp/cand hwy2 50000 | sed 's/stack=hwy2/stack=candidate_${{ matrix.variant }}/'
+              /tmp/base hwy2 50000 | sed 's/stack=hwy2/stack=frozen_2ulp/'
+              /tmp/cand apple 50000 | sed 's/stack=apple/stack=vvcos/'
+            } | tee /tmp/out/bench50k.txt
+          else
+            echo FAIL_3ULP | tee -a /tmp/out/verdict.txt
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-d3-reduction-${{ matrix.variant }}
+          path: /tmp/out
+          if-no-files-found: error
