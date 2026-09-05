@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         slot: [1, 2, 3, 4]
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
           set -euo pipefail
           OUT=/tmp/out/results.txt
           cp /tmp/out/verify.txt "$OUT"
-          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" >> "$OUT"
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string) os=$(sw_vers -productVersion)" >> "$OUT"
           echo "baseline=<5K AppleTwoCoreHighway;5K-30K pthreadpool-condvar+Highway" >> "$OUT"
           echo "candidate=<5K AppleTwoCoreAMX;5K-30K pthreadpool-condvar+manual-NEON+AMX-VECFP-f64" >> "$OUT"
           echo "amx_repo=$(git -C /tmp/corsix-amx rev-parse HEAD) pthreadpool=$(git -C /tmp/pthreadpool rev-parse HEAD)" >> "$OUT"
