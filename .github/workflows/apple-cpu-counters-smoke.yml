@@ -1,0 +1,28 @@
+name: Apple CPU counters smoke
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apple-cpu-counters-smoke.yml']
+jobs:
+  counters:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record and export CPU counters
+        shell: bash
+        run: |
+          set -u
+          cat >/tmp/spin.c <<'C'
+          #include <stdint.h>
+          #include <time.h>
+          int main(){volatile uint64_t x=1; struct timespec a,b; clock_gettime(CLOCK_MONOTONIC,&a); do{x=x*2862933555777941757ULL+3037000493ULL; clock_gettime(CLOCK_MONOTONIC,&b);}while((b.tv_sec-a.tv_sec)+1e-9*(b.tv_nsec-a.tv_nsec)<1.0); return (int)(x&1);}
+          C
+          clang -O3 /tmp/spin.c -o /tmp/spin
+          rm -rf /tmp/c.trace
+          xcrun xctrace record --template 'CPU Counters' --time-limit 2s --output /tmp/c.trace --no-prompt --launch -- /tmp/spin 2>&1 || true
+          echo '=== TOC ==='
+          xcrun xctrace export --input /tmp/c.trace --toc 2>&1 | tee /tmp/toc.xml | head -240 || true
+          echo '=== TRACE FILES ==='
+          find /tmp/c.trace -maxdepth 3 -type f -print | head -100 || true
