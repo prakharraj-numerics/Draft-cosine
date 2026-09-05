@@ -11,11 +11,16 @@ if [[ "$MODE" == "build" ]]; then
   brew list mpfr >/dev/null 2>&1 || brew install mpfr
   brew list gmp >/dev/null 2>&1 || brew install gmp
   brew list tbb >/dev/null 2>&1 || brew install tbb
-  brew list hwloc >/dev/null 2>&1 || brew install hwloc
 
-  rm -rf /tmp/pi-threadpool /tmp/pi-build /tmp/qthreads /tmp/qthreads-build /tmp/qthreads-install
+  rm -rf /tmp/highway /tmp/pi-threadpool /tmp/pi-build /tmp/qthreads /tmp/qthreads-build /tmp/qthreads-install
+  git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
+
   git clone --depth 1 https://github.com/PrimeIntellect-ai/threadpool.git /tmp/pi-threadpool
   git -C /tmp/pi-threadpool submodule update --init --recursive
+  # macOS SDK exports a global constant named `pi`; rename PrimeIntellect's
+  # namespace locally for this benchmark, without changing library behavior.
+  sed -i '' 's/namespace pi::threadpool/namespace pithreadpool_apple::threadpool/g' /tmp/pi-threadpool/include/pithreadpool/threadpool.hpp
+  sed -i '' 's/namespace pi::threadpool/namespace pithreadpool_apple::threadpool/g' /tmp/pi-threadpool/src/threadpool.cpp
   cmake -S /tmp/pi-threadpool -B /tmp/pi-build -DCMAKE_BUILD_TYPE=Release -DPI_THREADPOOL_BUILD_TESTS=OFF
   cmake --build /tmp/pi-build -j 4
 
@@ -24,7 +29,7 @@ if [[ "$MODE" == "build" ]]; then
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/tmp/qthreads-install \
     -DBUILD_SHARED_LIBS=ON
-  cmake --build /tmp/qthreads-build -j 4
+  cmake --build /tmp/qthreads-build --target qthread -j 4
   cmake --install /tmp/qthreads-build
 
   FREEZE=aefbe778e860ef70e64fc8d6b6d470b3575f3bbc
@@ -86,7 +91,7 @@ public:
 };
 
 class ApplePrime2 {
-    pi::threadpool::ThreadPool pool_;
+    pithreadpool_apple::threadpool::ThreadPool pool_;
 public:
     ApplePrime2(): pool_(1, 64) { pool_.startup(); }
     ~ApplePrime2() { pool_.shutdown(); }
@@ -197,11 +202,11 @@ PY
 
   TBBP="$(brew --prefix tbb)"
   clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
-    -I/tmp -I/tmp/pi-threadpool/include -I/tmp/pi-threadpool/third_party/threadpark/include \
+    -I/tmp -I/tmp/highway -I/tmp/pi-threadpool/include -I/tmp/pi-threadpool/third_party/threadpark/include \
     -I/tmp/qthreads-install/include -I"$TBBP/include" \
     /tmp/base.cpp /tmp/pi-build/libthreadpool.a /tmp/pi-build/third_party/threadpark/libthreadpark.a \
     -L/tmp/qthreads-install/lib -Wl,-rpath,/tmp/qthreads-install/lib \
-    -L"$TBBP/lib" -lqthread -ltbb -lhwloc \
+    -L"$TBBP/lib" -lqthread -ltbb \
     -framework Accelerate -pthread -ldl -o /tmp/apple_cos53_4way
   exit 0
 fi
