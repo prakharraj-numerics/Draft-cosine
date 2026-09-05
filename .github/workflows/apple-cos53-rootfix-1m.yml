@@ -1,0 +1,25 @@
+name: Apple COS53 rootfix 1M validation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-rootfix-1m.yml'
+      - 'benchmark_support/run_apple_cos53_rootfix_1m.sh'
+
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate root-centered repair on exact same 1M inputs
+        shell: bash
+        run: bash benchmark_support/run_apple_cos53_rootfix_1m.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-rootfix-1m
+          path: /tmp/rootfix_1m.txt
+          if-no-files-found: error
