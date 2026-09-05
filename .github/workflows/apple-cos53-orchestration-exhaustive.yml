@@ -1,4 +1,4 @@
-name: Apple COS53 30K best GCD vs Apple
+name: Apple COS53 22K 25K GCD vs Apple
 on:
   workflow_dispatch:
   push:
@@ -72,18 +72,21 @@ jobs:
           p.write_text(s)
           PY
           clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks -I/tmp -I/tmp/highway /tmp/orch.cpp -framework Accelerate -pthread -o /tmp/orch
-      - name: Benchmark 30K only
+      - name: Benchmark 22K and 25K only
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out; OUT=/tmp/out/results.txt
           echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
-          # Apple vvcos plus strongest GCD region from the 20K/50K sweep. Repeat each mode 5x.
-          modes=(apple gcd_ui_256 gcd_ui_512 gcd_ui_1024 gcd_init_256 gcd_init_512 gcd_init_1024 gcd_init_2048)
+          # Confirm crossover using the 30K winner plus UI-256 as the close alternative.
+          sizes=(22000 25000)
+          modes=(apple gcd_init_256 gcd_ui_256)
           for r in 1 2 3 4 5; do
-            for mode in "${modes[@]}"; do /tmp/orch "$mode" 30000 | tee -a "$OUT"; done
+            for n in "${sizes[@]}"; do
+              for mode in "${modes[@]}"; do /tmp/orch "$mode" "$n" | tee -a "$OUT"; done
+            done
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-30k-${{ matrix.slot }}
+          name: apple-cos53-22k-25k-${{ matrix.slot }}
           path: /tmp/out
