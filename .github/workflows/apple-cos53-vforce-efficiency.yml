@@ -1,0 +1,125 @@
+name: Apple COS53 vs vForce efficiency
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'benchmark_support/apple_cos53_benchmark.cpp'
+      - 'benchmark_support/apple_cos53_coeff_bridge.c'
+      - 'benchmark_support/apple_cos53_generate_constants.c'
+      - '.github/workflows/apple-cos53-vforce-efficiency.yml'
+
+jobs:
+  benchmark:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slot: [1,2,3,4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require native Apple M1 environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          CPU="$(sysctl -n machdep.cpu.brand_string)"
+          PHYS="$(sysctl -n hw.physicalcpu)"
+          LOG="$(sysctl -n hw.logicalcpu)"
+          echo "CPU=$CPU physical=$PHYS logical=$LOG slot=${{ matrix.slot }}"
+          [[ "$CPU" == *"Apple M1"* ]]
+          test "$PHYS" -ge 2
+          test "$LOG" -ge 2
+
+      - name: Install coefficient-generation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list flint >/dev/null 2>&1 || brew install flint
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+
+      - name: Generate production-formula constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/sine_53_coeff_source.c /tmp/apple_cosine53_coeff_source.c
+          sed -i '' 's/#define SF_K 12/#define SF_K 8/' /tmp/apple_cosine53_coeff_source.c
+          sed -i '' 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' /tmp/apple_cosine53_coeff_source.c
+          python3 - <<'PY'
+          from pathlib import Path
+          import cosine53_apply_formula_conversion as m
+          m.patch_coeff(Path('/tmp/apple_cosine53_coeff_source.c'))
+          PY
+          FP="$(brew --prefix flint)"
+          MP="$(brew --prefix mpfr)"
+          GP="$(brew --prefix gmp)"
+          clang -O2 -DNDEBUG -I/tmp -I"$FP/include" -I"$MP/include" -I"$GP/include" \
+            benchmark_support/apple_cos53_coeff_bridge.c \
+            benchmark_support/apple_cos53_generate_constants.c \
+            -L"$FP/lib" -L"$MP/lib" -L"$GP/lib" -lflint -lmpfr -lgmp -lm \
+            -o /tmp/apple_cos53_generate_constants
+          /tmp/apple_cos53_generate_constants /tmp/apple_cos53_constants.h
+          test -s /tmp/apple_cos53_constants.h
+          shasum -a 256 /tmp/apple_cos53_constants.h | tee /tmp/constants.sha256
+
+      - name: Build native NEON benchmark and MPFR validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          MP="$(brew --prefix mpfr)"
+          GP="$(brew --prefix gmp)"
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off \
+            -I/tmp benchmark_support/apple_cos53_benchmark.cpp \
+            -framework Accelerate -pthread -o /tmp/apple_cos53_bench
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off \
+            -DAPPLE_COS53_VALIDATE_MPFR -I/tmp -I"$MP/include" -I"$GP/include" \
+            benchmark_support/apple_cos53_benchmark.cpp \
+            -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp \
+            -o /tmp/apple_cos53_validate
+
+      - name: Validate accuracy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/apple-cos53-result
+          /tmp/apple_cos53_validate validate | tee /tmp/apple-cos53-result/accuracy.txt
+
+      - name: Benchmark speed CPU and memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/apple-cos53-result/results.txt
+          : > "$OUT"
+          echo "APPLE_ENV cpu=$(sysctl -n machdep.cpu.brand_string) physical=$(sysctl -n hw.physicalcpu) logical=$(sysctl -n hw.logicalcpu) arch=$(uname -m) os=$(sw_vers -productVersion) compiler='$(clang++ --version | head -1)' comparator=Accelerate_vForce_vvcos ours=Mode5_cosine_NEON_128b single_and_two_worker" | tee -a "$OUT"
+          sizes=(100 400 1200 3000 5000 20000 50000 200000)
+          for n in "${sizes[@]}"; do
+            case $((n % 3)) in
+              0) order=(apple ours1 ours2) ;;
+              1) order=(ours1 ours2 apple) ;;
+              2) order=(ours2 apple ours1) ;;
+            esac
+            for s in "${order[@]}"; do
+              /tmp/apple_cos53_bench "$s" "$n" | tee -a "$OUT"
+            done
+          done
+          cp /tmp/constants.sha256 /tmp/apple-cos53-result/constants.sha256
+          cat > /tmp/apple-cos53-result/metric_limitations.txt <<'TXT'
+          INSTRUCTIONS=unavailable_on_GitHub_Apple_M1_Virtual; Instruments CPU Counters reports this device does not support CPU Hardware Counters.
+          LOGICAL_BYTES=unavailable_as_a_comparable_dynamic_metric_on_this_host; Intel SDE is x86-only and the Apple VM exposes no equivalent full dynamic memory-access counter for Accelerate internals.
+          SPEED=median_of_7_native_trials_ns_per_element.
+          CPU=process_CPU_time_ns_per_element; effective_cores=CPU_time/wall_time.
+          MEMORY=ru_maxrss bytes measured in a separate process per stack/size, so benchmark input/output allocation is treated symmetrically.
+          APPLE_PARALLELISM=two persistent pthread workers at USER_INTERACTIVE QoS; macOS does not expose Linux-style strict CPU-number pinning, so effective_cores is reported rather than claiming fixed core IDs.
+          TXT
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-vforce-efficiency-${{ matrix.slot }}
+          path: /tmp/apple-cos53-result
+          if-no-files-found: error
