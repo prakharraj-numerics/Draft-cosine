@@ -1,0 +1,40 @@
+name: Apple COS53 production routing smoke
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'apple_cos53_production_routing.hpp'
+      - 'APPLE_COS53_PRODUCTION_ROUTING.md'
+      - '.github/workflows/apple-cos53-production-routing-smoke.yml'
+jobs:
+  smoke:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify frozen routing boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/smoke.cpp <<'CPP'
+          #include <cstddef>
+          struct AppleTwoCoreHighway { void run(const double*, double*, std::size_t) {} };
+          static inline void cos53_eval_hwy(const double*, double*, std::size_t) {}
+          #include "apple_cos53_production_routing.hpp"
+          int main() {
+            using apple_cos53_production::frozen_piece_count;
+            return !(
+              frozen_piece_count(29999) == 0 &&
+              frozen_piece_count(30000) == 32 &&
+              frozen_piece_count(49999) == 32 &&
+              frozen_piece_count(50000) == 16 &&
+              frozen_piece_count(99999) == 16 &&
+              frozen_piece_count(100000) == 12 &&
+              frozen_piece_count(999999) == 12 &&
+              frozen_piece_count(1000000) == 24 &&
+              frozen_piece_count(2000000) == 24
+            );
+          }
+          CPP
+          clang++ -std=c++20 -O2 -I. /tmp/smoke.cpp -o /tmp/smoke
+          /tmp/smoke
