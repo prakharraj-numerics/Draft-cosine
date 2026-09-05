@@ -14,7 +14,7 @@ static double fixed103_to_double(const mp_limb_t q[2], int neg)
     arf_t a;
     fmpz_init(z);
     arf_init(a);
-    fmpz_set_ui_array(z, 2, q);
+    fmpz_set_ui_array(z, q, 2);
     arf_set_fmpz(a, z);
     arf_mul_2exp_si(a, a, -103);
     double d = arf_get_d(a, ARF_RND_NEAR);
