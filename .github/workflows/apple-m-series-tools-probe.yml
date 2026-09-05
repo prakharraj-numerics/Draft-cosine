@@ -1,0 +1,30 @@
+name: Apple M-series performance tools probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apple-m-series-tools-probe.yml'
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe Apple profiling tools
+        shell: bash
+        run: |
+          set -u
+          echo '=== CPU ==='
+          sysctl -n machdep.cpu.brand_string || true
+          sysctl -n hw.physicalcpu || true
+          echo '=== xctrace templates ==='
+          xcrun xctrace list templates 2>&1 || true
+          echo '=== xctrace help ==='
+          xcrun xctrace help record 2>&1 | head -120 || true
+          echo '=== powermetrics help ==='
+          powermetrics --help 2>&1 | head -160 || true
+          echo '=== kperf symbols ==='
+          nm -gU /System/Library/PrivateFrameworks/kperf.framework/kperf 2>/dev/null | head -80 || true
