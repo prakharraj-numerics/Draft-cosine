@@ -1,0 +1,25 @@
+name: Apple COS53 near-zero diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-nearzero-diagnostic.yml'
+      - 'benchmark_support/run_apple_cos53_nearzero_diagnostic.sh'
+
+jobs:
+  diagnostic:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compile and validate baseline vs near-zero repair
+        shell: bash
+        run: bash benchmark_support/run_apple_cos53_nearzero_diagnostic.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-nearzero-diagnostic
+          path: /tmp/nearzero_diag.txt
+          if-no-files-found: error
