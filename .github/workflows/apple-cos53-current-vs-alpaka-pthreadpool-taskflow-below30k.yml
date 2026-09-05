@@ -1,0 +1,71 @@
+name: Apple COS53 current vs Alpaka pthreadpool Taskflow below30K
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-current-vs-alpaka-pthreadpool-taskflow-below30k.yml'
+      - 'benchmark_support/run_apple_cos53_current_vs_alpaka_pthreadpool_taskflow_below30k.sh'
+
+concurrency:
+  group: apple-cos53-alpaka-pthreadpool-taskflow-below30k
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build four variants once
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_current_vs_alpaka_pthreadpool_taskflow_below30k.sh build
+
+      - name: Verify bitwise-equivalent outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          : > /tmp/out/verify.txt
+          for stack in current alpaka pthreadpool taskflow; do
+            bash benchmark_support/run_apple_cos53_current_vs_alpaka_pthreadpool_taskflow_below30k.sh verify "$stack" | tee -a /tmp/out/verify.txt
+          done
+
+      - name: Benchmark isolated scheduler processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/results.txt
+          cp /tmp/out/verify.txt "$OUT"
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" >> "$OUT"
+          echo "kernel=K2048 degree3 terms1 frozen=aefbe778e860ef70e64fc8d6b6d470b3575f3bbc" >> "$OUT"
+          echo "stacks=current,alpaka,pthreadpool-condvar,taskflow; each timing in its own process" >> "$OUT"
+          echo "alpaka=$(git -C /tmp/alpaka rev-parse HEAD) pthreadpool=$(git -C /tmp/pthreadpool rev-parse HEAD) taskflow=$(git -C /tmp/taskflow rev-parse HEAD)" >> "$OUT"
+          sizes=(100 400 1200 3000 5000 7500 10000 15000 20000 25000 29999)
+          stacks=(current alpaka pthreadpool taskflow)
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }}) % 4 ))
+              for j in 0 1 2 3; do
+                idx=$(( (j + order) % 4 ))
+                stack="${stacks[$idx]}"
+                bash benchmark_support/run_apple_cos53_current_vs_alpaka_pthreadpool_taskflow_below30k.sh one "$stack" "$n" \
+                  | sed "s/^/round=$((r+1)) /" | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-current-alpaka-pthreadpool-taskflow-below30k-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
