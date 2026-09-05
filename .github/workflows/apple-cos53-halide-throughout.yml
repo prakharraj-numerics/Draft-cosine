@@ -1,0 +1,150 @@
+name: Apple COS53 Halide orchestration throughout
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apple-cos53-halide-throughout.yml'
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require M1 and install deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          [[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]
+          brew list flint >/dev/null 2>&1 || brew install flint
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+          brew list halide >/dev/null 2>&1 || brew install halide
+          git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
+
+      - name: Build frozen K2048 degree3 constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/sine_53_coeff_source.c /tmp/src.c
+          cp benchmark_support/apple_cos53_coeff_bridge.c /tmp/bridge.c
+          cp benchmark_support/apple_cos53_generate_constants.c /tmp/gen.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/src.c')
+          s=p.read_text().replace('#define SF_K 12','#define SF_K 11').replace('#define SF_LUT_N ((1UL << SF_K) + 1UL)','#define SF_LUT_N 3218UL')
+          p.write_text(s)
+          p=Path('/tmp/bridge.c')
+          s=p.read_text().replace('#include "apple_cosine53_coeff_source.c"','#include "src.c"').replace('s53_coeff_create_terms(2)','s53_coeff_create_terms(1)').replace('c->poly_deg != 5','c->poly_deg != 3')
+          p.write_text(s)
+          p=Path('/tmp/gen.c'); p.write_text(p.read_text().replace('#define LUTN 403','#define LUTN 3218'))
+          import cosine53_apply_formula_conversion as m
+          m.patch_coeff(Path('/tmp/src.c'))
+          PY
+          FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          clang -O2 -DNDEBUG -I/tmp -I$FP/include -I$MP/include -I$GP/include /tmp/bridge.c /tmp/gen.c -L$FP/lib -L$MP/lib -L$GP/lib -lflint -lmpfr -lgmp -lm -o /tmp/gen
+          /tmp/gen /tmp/apple_cos53_constants_2ulp.h
+
+      - name: Generate Halide-vs-production benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/halide.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/halide.cpp'); s=p.read_text()
+          s=s.replace('#include <vector>','#include <vector>\n#include <HalideRuntime.h>')
+          s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_2ulp.h"')
+          s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;').replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
+          s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+          start=s.index('        auto c2 = hn::Mul(c0, mh);'); end=s.index('        uint64_t sm0=', start)
+          s=s[:start]+'''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);\n\n'''+s[end:]
+          marker='static size_t reps_for(size_t n)'
+          inject=r'''
+          static inline void cos53_eval_range(const double* x,double* y,size_t a,size_t b) {
+              cos53_eval_hwy(x+a,y+a,b-a);
+          }
+          struct PartCtx { const double* x; double* y; size_t n; size_t pieces; };
+          static void dispatch_piece(void *vp, size_t j) {
+              auto *c=(PartCtx*)vp;
+              size_t a=(c->n*j)/c->pieces, b=(c->n*(j+1))/c->pieces;
+              cos53_eval_range(c->x,c->y,a,b);
+          }
+          static void run_dispatch(const double*x,double*y,size_t n,size_t pieces) {
+              size_t p=std::min(pieces,n); PartCtx c{x,y,n,p};
+              dispatch_apply_f(p, DISPATCH_APPLY_AUTO, &c, dispatch_piece);
+          }
+          static int halide_piece(void*, int j, uint8_t *closure) {
+              auto *c=reinterpret_cast<PartCtx*>(closure);
+              size_t jj=(size_t)j;
+              size_t a=(c->n*jj)/c->pieces, b=(c->n*(jj+1))/c->pieces;
+              cos53_eval_range(c->x,c->y,a,b);
+              return 0;
+          }
+          static void run_halide(const double*x,double*y,size_t n,size_t pieces) {
+              size_t p=std::min(pieces,n); PartCtx c{x,y,n,p};
+              int rc=halide_do_par_for(nullptr, halide_piece, 0, (int)p, reinterpret_cast<uint8_t*>(&c));
+              if(rc) std::abort();
+          }
+          static size_t prod_pieces(size_t n) {
+              if(n<30000) return 0;
+              if(n<50000) return 32;
+              if(n<100000) return 16;
+              if(n<1000000) return 12;
+              return 24;
+          }
+          static void run_prod(AppleTwoCoreHighway &tc, Buffers &b) {
+              size_t p=prod_pieces(b.n);
+              for(int c=0;c<6;c++) {
+                  if(!p) tc.run(b.x[c],b.y[c],b.n);
+                  else run_dispatch(b.x[c],b.y[c],b.n,p);
+              }
+          }
+          static void run_halide_all(Buffers &b,size_t pieces) {
+              for(int c=0;c<6;c++) run_halide(b.x[c],b.y[c],b.n,pieces);
+          }
+          '''
+          s=s.replace(marker,inject+'\n'+marker,1)
+          old='''    AppleTwoCoreHighway *tc = stack=="hwy2" ? new AppleTwoCoreHighway() : nullptr;\n    auto once=[&]{ if(stack=="apple")run_apple(b); else run_hwy2(*tc,b); };'''
+          new='''    AppleTwoCoreHighway *tc = (stack=="hwy2" || stack=="prod") ? new AppleTwoCoreHighway() : nullptr;\n    auto once=[&]{\n        if(stack=="apple") run_apple(b);\n        else if(stack=="hwy2") run_hwy2(*tc,b);\n        else if(stack=="prod") run_prod(*tc,b);\n        else if(stack.rfind("halide_",0)==0) run_halide_all(b,std::stoull(stack.substr(7)));\n    };'''
+          assert old in s; s=s.replace(old,new,1)
+          old_guard='if(stack!="hwy2" && stack!="apple") return 3;'
+          new_guard='if(stack!="hwy2" && stack!="apple" && stack!="prod" && stack.rfind("halide_",0)!=0) return 3;'
+          assert old_guard in s; s=s.replace(old_guard,new_guard,1)
+          s=s.replace('    return bench_mode(stack,n);','    halide_set_num_threads(3);\n    return bench_mode(stack,n);',1)
+          p.write_text(s)
+          PY
+          HP="$(brew --prefix halide)"
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
+            -I/tmp -I/tmp/highway -I"$HP/include" /tmp/halide.cpp \
+            -L"$HP/lib" -lHalide -framework Accelerate -pthread -o /tmp/halide_bench
+
+      - name: Full Halide sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
+          echo "cacheline=$(sysctl -n hw.cachelinesize) l1d=$(sysctl -n hw.l1dcachesize) l2=$(sysctl -n hw.l2cachesize)" | tee -a "$OUT"
+          modes=(apple prod halide_12 halide_16 halide_24 halide_32)
+          sizes=(100 400 1200 3000 5000 20000 30000 40000 50000 75000 100000 200000 500000 1000000)
+          for r in 1 2 3; do
+            for n in "${sizes[@]}"; do
+              for mode in "${modes[@]}"; do
+                /tmp/halide_bench "$mode" "$n" | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-halide-throughout-${{ matrix.slot }}
+          path: /tmp/out
