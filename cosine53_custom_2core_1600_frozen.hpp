@@ -1,37 +1,12 @@
 #pragma once
 
-/* COS53 FROZEN custom permanent 2-core scheduler.
+/* Fixed two-core scheduler used by the production batch dispatcher.
+   The caller runs on CPU0 and one permanent helper runs on CPU2. Work is
+   divided on 32-value boundaries and synchronized with release/acquire
+   generation and completion counters. Batches with fewer than two complete
+   32-value blocks stay on the caller thread.
 
-   Production threshold promoted from exact Intel Xeon 6973P-C evidence:
-
-     - broad three-way benchmark: run 33562041646, shard 41
-     - focused boundary benchmark: run 33563237026, shard 5
-     - replicated 1500-1900 boundary benchmark: run 33564357475,
-       exact Xeon shards 23 and 38
-
-   Validated behavior relevant to the frozen production rule:
-     - custom2 output was bit-identical to current COS53 on the tested maps
-     - at n=1500, current COS53 won the all-six average on both exact-Xeon shards
-     - at n=1600, custom2 won the all-six average on both exact-Xeon shards
-       (the margin was small and some individual cells remained mixed)
-     - at n=1700 and n=1900, custom2 won all six cells on both replicated shards
-     - at every tested point from n=2000 through n=4000000, custom2 beat current
-       COS53 on the tested grid
-
-   This file contains scheduling only. It does not alter cosine mathematics,
-   constants, range reduction, polynomial evaluation, or output semantics.
-
-   Execution model on the validated 2-physical-core Xeon runner:
-     - caller thread pinned to CPU0
-     - one permanent helper pinned to CPU2
-     - work split on a 32-double boundary
-     - release/acquire generation handoff and completion counter
-     - no queue, work stealing, task allocation, or per-call thread creation
-
-   The <64-value fallback is retained exactly: fewer than two complete
-   32-value blocks execute on the caller only.
-
-   FROZEN: do not modify. Future experiments must use a new candidate file.
+   Keep this scheduler unchanged unless it is re-benchmarked.
 */
 
 #include <atomic>
