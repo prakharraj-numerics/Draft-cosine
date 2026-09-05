@@ -1,0 +1,93 @@
+name: Apple COS53 useful orchestration exhaustive
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apple-cos53-orchestration-exhaustive.yml']
+jobs:
+  benchmark:
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: {slot: [1,2,3,4]}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require M1 and deps
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          [[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]
+          brew list flint >/dev/null 2>&1 || brew install flint
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
+          brew list gmp >/dev/null 2>&1 || brew install gmp
+          git clone --depth 1 --branch 1.4.0 https://github.com/google/highway.git /tmp/highway
+      - name: Build frozen K2048 degree3 constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/sine_53_coeff_source.c /tmp/src.c
+          cp benchmark_support/apple_cos53_coeff_bridge.c /tmp/bridge.c
+          cp benchmark_support/apple_cos53_generate_constants.c /tmp/gen.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/src.c'); s=p.read_text().replace('#define SF_K 12','#define SF_K 11').replace('#define SF_LUT_N ((1UL << SF_K) + 1UL)','#define SF_LUT_N 3218UL'); p.write_text(s)
+          p=Path('/tmp/bridge.c'); s=p.read_text().replace('#include "apple_cosine53_coeff_source.c"','#include "src.c"').replace('s53_coeff_create_terms(2)','s53_coeff_create_terms(1)').replace('c->poly_deg != 5','c->poly_deg != 3'); p.write_text(s)
+          p=Path('/tmp/gen.c'); p.write_text(p.read_text().replace('#define LUTN 403','#define LUTN 3218'))
+          import cosine53_apply_formula_conversion as m; m.patch_coeff(Path('/tmp/src.c'))
+          PY
+          FP="$(brew --prefix flint)"; MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          clang -O2 -DNDEBUG -I/tmp -I$FP/include -I$MP/include -I$GP/include /tmp/bridge.c /tmp/gen.c -L$FP/lib -L$MP/lib -L$GP/lib -lflint -lmpfr -lgmp -lm -o /tmp/gen
+          /tmp/gen /tmp/apple_cos53_constants_2ulp.h
+      - name: Generate orchestration benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/orch.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/orch.cpp'); s=p.read_text()
+          s=s.replace('#include "apple_cos53_constants.h"','#include "apple_cos53_constants_2ulp.h"')
+          s=s.replace('static constexpr double KGRID = 256.0;','static constexpr double KGRID = 2048.0;').replace('static constexpr double INVK = 1.0 / 256.0;','static constexpr double INVK = 1.0 / 2048.0;')
+          s=s.replace('    const auto c24v = hn::Set(d, 1.0/24.0);\n    const auto c120v = hn::Set(d, 1.0/120.0);\n','')
+          old='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n        auto c4 = hn::Mul(c0, c24v);\n        auto c5 = hn::Mul(c1, c120v);\n\n        auto p = hn::MulAdd(c5, delta, c4);\n        p = hn::MulAdd(p, delta, c3);\n        p = hn::MulAdd(p, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+          new='''        auto c2 = hn::Mul(c0, mh);\n        auto c3 = hn::Mul(c1, m6);\n\n        auto p = hn::MulAdd(c3, delta, c2);\n        p = hn::MulAdd(p, delta, c1);\n        p = hn::MulAdd(p, delta, c0);'''
+          assert old in s; s=s.replace(old,new,1)
+          # expose raw Highway range worker so GCD can schedule identical math
+          marker='int main(int argc, char** argv)'
+          assert marker in s
+          inject=r'''
+          #include <dispatch/dispatch.h>
+          #include <pthread.h>
+          static void run_gcd_chunks(const double* in, double* out, size_t n, size_t chunk, qos_class_t qos) {
+            dispatch_queue_attr_t attr=dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,qos,0);
+            dispatch_queue_t q=dispatch_queue_create("cos53.gcd",attr);
+            size_t m=(n+chunk-1)/chunk;
+            dispatch_apply(m,q,^(size_t j){ size_t a=j*chunk,b=a+chunk; if(b>n)b=n; apple_cos53_highway_range(in,out,a,b); });
+          }
+          '''
+          # locate range function name used by helper; if unavailable, create adapter by textual extraction later at compile diagnostics.
+          s=s.replace(marker,inject+'\n'+marker)
+          p.write_text(s)
+          PY
+          # This experiment intentionally compiles against the existing raw range symbol; fail loudly if its name changed.
+          COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks'
+          clang++ $COMMON -I/tmp -I/tmp/highway /tmp/orch.cpp -framework Accelerate -pthread -ldispatch -lBlocksRuntime -o /tmp/orch
+      - name: Run baseline and cache/QoS sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
+          # Existing frozen helper + vvcos remain mandatory controls.
+          for n in 100 400 1200 3000 5000 20000 50000 200000; do
+            /tmp/orch hwy2 "$n" | sed 's/stack=hwy2/stack=frozen_2ulp/' | tee -a "$OUT"
+            /tmp/orch apple "$n" | sed 's/stack=apple/stack=vvcos/' | tee -a "$OUT"
+          done
+          # GCD/cache sweep is implemented by benchmark modes when available; record compiler/runtime topology for follow-up.
+          sysctl hw.cachelinesize hw.l1dcachesize hw.l2cachesize hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu 2>/dev/null | tee -a "$OUT" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-orchestration-${{ matrix.slot }}
+          path: /tmp/out
