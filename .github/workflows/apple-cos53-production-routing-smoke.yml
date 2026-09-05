@@ -32,6 +32,23 @@ jobs:
             for (std::size_t i = 0; i < range; ++i) fn(ctx, i);
           }
           H
+          cat > /tmp/HalideRuntime.h <<'H'
+          #pragma once
+          #include <cstdint>
+          typedef int (*halide_task_t)(void*, int, std::uint8_t*);
+          static inline int halide_set_num_threads(int) { return 0; }
+          static inline int halide_do_par_for(void* user_context,
+                                              halide_task_t task,
+                                              int min,
+                                              int size,
+                                              std::uint8_t* closure) {
+            for (int i = 0; i < size; ++i) {
+              const int rc = task(user_context, min + i, closure);
+              if (rc != 0) return rc;
+            }
+            return 0;
+          }
+          H
           cat > /tmp/smoke.cpp <<'CPP'
           #include <cstddef>
           struct AppleTwoCoreHighway { void run(const double*, double*, std::size_t) {} };
