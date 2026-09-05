@@ -7,6 +7,7 @@ on:
       - '.github/workflows/apple-cos53-current-vs-highway-fastflow-below30k.yml'
       - 'benchmark_support/run_apple_cos53_current_vs_highwaypool_vs_fastflow_below30k.sh'
 
+# Three-way scheduler benchmark; production routing is not modified.
 jobs:
   benchmark:
     strategy:
