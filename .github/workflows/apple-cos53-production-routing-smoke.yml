@@ -16,6 +16,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cat > /tmp/pthreadpool.h <<'H'
+          #pragma once
+          #include <cstddef>
+          #include <cstdint>
+          typedef struct pthreadpool* pthreadpool_t;
+          typedef void (*pthreadpool_task_1d_t)(void*, std::size_t);
+          static inline pthreadpool_t pthreadpool_create(std::size_t) { return (pthreadpool_t)1; }
+          static inline void pthreadpool_destroy(pthreadpool_t) {}
+          static inline void pthreadpool_parallelize_1d(pthreadpool_t,
+                                                        pthreadpool_task_1d_t fn,
+                                                        void* ctx,
+                                                        std::size_t range,
+                                                        std::uint32_t) {
+            for (std::size_t i = 0; i < range; ++i) fn(ctx, i);
+          }
+          H
           cat > /tmp/smoke.cpp <<'CPP'
           #include <cstddef>
           struct AppleTwoCoreHighway { void run(const double*, double*, std::size_t) {} };
@@ -23,7 +39,18 @@ jobs:
           #include "apple_cos53_production_routing.hpp"
           int main() {
             using apple_cos53_production::frozen_piece_count;
+            using apple_cos53_production::use_pthreadpool;
+            using apple_cos53_production::use_halide;
             return !(
+              !use_pthreadpool(0) &&
+              !use_pthreadpool(4999) &&
+               use_pthreadpool(5000) &&
+               use_pthreadpool(29999) &&
+              !use_pthreadpool(30000) &&
+              !use_halide(29999) &&
+               use_halide(30000) &&
+               use_halide(40000) &&
+              !use_halide(40001) &&
               frozen_piece_count(29999) == 0 &&
               frozen_piece_count(30000) == 32 &&
               frozen_piece_count(49999) == 32 &&
@@ -36,5 +63,5 @@ jobs:
             );
           }
           CPP
-          clang++ -std=c++20 -O2 -I. /tmp/smoke.cpp -o /tmp/smoke
+          clang++ -std=c++20 -O2 -I/tmp -I. /tmp/smoke.cpp -o /tmp/smoke
           /tmp/smoke
