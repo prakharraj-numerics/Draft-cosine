@@ -1,4 +1,4 @@
-# Fresh-run trigger: 2026-09-05
+# Fresh-run trigger: 2026-09-05 attempt 2
 name: Intel COS53 production same 1M any AVX512 CPU
 
 on:
