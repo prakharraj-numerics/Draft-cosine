@@ -56,6 +56,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          HP="$(brew --prefix halide)"
+          cat >/tmp/genrt.cpp <<'CPP'
+          #include <Halide.h>
+          int main() {
+              Halide::compile_standalone_runtime("/tmp/halide_runtime.a", Halide::get_host_target());
+              return 0;
+          }
+          CPP
+          clang++ -O2 -std=c++20 -I"$HP/include" /tmp/genrt.cpp -L"$HP/lib" -lHalide -o /tmp/genrt
+          /tmp/genrt
+          nm /tmp/halide_runtime.a | grep -E 'halide_do_par_for|halide_set_num_threads' >/dev/null
+
           cp benchmark_support/apple_cos53_highway_benchmark.cpp /tmp/halide.cpp
           python3 - <<'PY'
           from pathlib import Path
@@ -121,10 +133,9 @@ jobs:
           s=s.replace('    return bench_mode(stack,n);','    halide_set_num_threads(3);\n    return bench_mode(stack,n);',1)
           p.write_text(s)
           PY
-          HP="$(brew --prefix halide)"
           clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off -fblocks \
-            -I/tmp -I/tmp/highway -I"$HP/include" /tmp/halide.cpp \
-            -L"$HP/lib" -lHalide -framework Accelerate -pthread -o /tmp/halide_bench
+            -I/tmp -I/tmp/highway -I"$HP/include" /tmp/halide.cpp /tmp/halide_runtime.a \
+            -framework Accelerate -pthread -ldl -o /tmp/halide_bench
 
       - name: Full Halide sweep
         shell: bash
