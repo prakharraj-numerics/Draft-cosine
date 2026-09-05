@@ -4,18 +4,21 @@
  *
  * Scheduling only: this does not alter cosine mathematics.
  *
- * Intel/Linux Custom2 mechanics retained:
+ * Custom2 mechanics retained:
  *   - one permanent helper thread
  *   - release/acquire generation handoff
  *   - completion generation counter
  *   - no task queue, work stealing, allocation, or per-call thread creation
- *   - split on a 32-double boundary
- *   - caller-only fallback when fewer than two complete 32-value blocks exist
+ *   - permanent spin worker between generations
  *
- * Apple-specific substitution:
- *   Linux CPU affinity is not portable to macOS, so both caller/helper request
- *   QOS_CLASS_USER_INTERACTIVE. The helper uses the ARM YIELD hint while
- *   waiting for the next generation.
+ * Apple-specific substitutions:
+ *   - Linux CPU affinity is not portable to macOS, so caller/helper request
+ *     QOS_CLASS_USER_INTERACTIVE.
+ *   - The Xeon implementation split on a 32-double engine boundary. The Apple
+ *     Highway kernel is 2-double Full128, so the Apple port uses a balanced
+ *     half split aligned to 2 doubles. This preserves Custom2 scheduling while
+ *     avoiding Intel-specific 32/68 imbalance at small Apple batches.
+ *   - The helper uses the ARM YIELD hint while waiting for the next generation.
  */
 
 #if !defined(__APPLE__)
@@ -52,14 +55,8 @@ public:
     void run(const double *in, double *out, std::size_t n) {
         if (!n) return;
 
-        const std::size_t full32 = n / 32;
-        if (full32 < 2) {
-            fn_(in, out, n);
-            return;
-        }
-
-        const std::size_t split_blocks = full32 / 2;
-        const std::size_t split = split_blocks * 32;
+        // Balanced Apple split, aligned to one Full128<double> vector (2 doubles).
+        const std::size_t split = (n / 2) & ~std::size_t(1);
         if (split == 0 || split >= n) {
             fn_(in, out, n);
             return;
