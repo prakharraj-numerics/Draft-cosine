@@ -1,0 +1,75 @@
+name: Apple COS53 PLUTO MATH SWEEP v2 smoke
+
+on:
+  push:
+    branches: [exp/apple-cos53-PLUTO-MATH-SWEEP-v2-20260906]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-cos53-pluto-math-sweep-v2-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Guard frozen PLUTO
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin freeze/apple-cos53-PLUTO-20260906
+          test "$(git rev-parse FETCH_HEAD)" = d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+      - name: Build all candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP_FIXED.sh build
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP_FIXED.sh variants | tee /tmp/out/variants.txt
+      - name: Accuracy gate all candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          : >/tmp/out/accuracy.txt; : >/tmp/out/survivors.txt
+          while read -r v; do
+            txt=$(bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP_FIXED.sh validate "$v")
+            printf '=== %s ===\n%s\n' "$v" "$txt" | tee -a /tmp/out/accuracy.txt
+            max=$(printf '%s\n' "$txt" | awk '/APPLE_COS53_CPU_EFF_ACCURACY/{for(i=1;i<=NF;i++)if($i~/^maxulp=/){split($i,a,"=");if(a[2]+0>m)m=a[2]+0;f=1}}END{if(!f)print 999999;else print m+0}')
+            echo "SUMMARY variant=$v maxulp=$max" | tee -a /tmp/out/accuracy.txt
+            if (( max <= 2 )); then echo "$v" >> /tmp/out/survivors.txt; fi
+          done </tmp/out/variants.txt
+          test -s /tmp/out/survivors.txt
+      - name: 1M single-thread shootout
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/smoke_1m.txt; : >"$OUT"
+          for r in 1 2 3 4; do
+            bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP_FIXED.sh pluto 1000000 | sed "s/^/round=$r role=PLUTO /" | tee -a "$OUT"
+            while read -r v; do bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP_FIXED.sh one "$v" 1000000 | sed "s/^/round=$r role=$v /" | tee -a "$OUT"; done </tmp/out/survivors.txt
+            bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP_FIXED.sh apple 1000000 | sed "s/^/round=$r role=APPLE /" | tee -a "$OUT"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,statistics
+          d={}
+          for l in Path('/tmp/out/smoke_1m.txt').read_text().splitlines():
+            m=re.search(r'role=(\S+).*wall_ns_el=([0-9.]+).*cpu_ns_el=([0-9.]+)',l)
+            if m:d.setdefault(m.group(1),[]).append((float(m.group(2)),float(m.group(3))))
+          rows=[]
+          for k,v in d.items():
+            w=statistics.median(x[0] for x in v);c=statistics.median(x[1] for x in v);rows.append((w+c,k,w,c))
+          rows.sort(); out='\n'.join(f'{k} wall={w:.9f} cpu={c:.9f}' for _,k,w,c in rows)
+          cand=[x for x in rows if x[1] not in ('PLUTO','APPLE')][:4]
+          out+='\nSELECTED '+' '.join(x[1] for x in cand)+'\n'
+          Path('/tmp/out/selection.txt').write_text(out);print(out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-math-v2-smoke
+          path: /tmp/out
+          if-no-files-found: error
