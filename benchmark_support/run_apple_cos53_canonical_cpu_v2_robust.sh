@@ -31,7 +31,7 @@ if [[ "$MODE" == one ]]; then
   [[ $# -eq 2 ]]
   n="$2"
   # Only routes that reproduced as BOTH faster and lower-CPU than canonical
-  # in paired same-run verification are allowed to replace canonical.
+  # in pooled final 12-sample verification are allowed to replace canonical.
   case "$n" in
     100)   exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one single_utility "$n" ;;
     400)   exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one wg2_utility "$n" ;;
@@ -40,7 +40,6 @@ if [[ "$MODE" == one ]]; then
     5000)  exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh one pool2 "$n" ;;
     7500)  exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh one pool2 "$n" ;;
     15000) exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh one pool2 "$n" ;;
-    30000) exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one wg3_default "$n" ;;
     40000) exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one wg3_user "$n" ;;
     50000) exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one wg2_ui "$n" ;;
     *) run_canonical "$n" ;;
