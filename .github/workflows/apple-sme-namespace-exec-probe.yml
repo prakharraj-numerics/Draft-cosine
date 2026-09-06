@@ -13,84 +13,54 @@ jobs:
     runs-on: nscloud-macos-tahoe-arm64-6x14
     steps:
       - uses: actions/checkout@v4
-      - name: Probe streaming-SVE execution
+      - name: Probe locally-streaming ABI
         shell: bash
         run: |
           set -u
           echo "BRAND=$(sysctl -n machdep.cpu.brand_string)"
           echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME) SME2=$(sysctl -n hw.optional.arm.FEAT_SME2) SVL=$(sysctl -n hw.optional.arm.sme_max_svl_b)"
           echo "SME_FA64=$(sysctl -n hw.optional.arm.FEAT_SME_FA64 2>/dev/null || echo missing)"
+          echo | clang++ -dM -E -x c++ - -march=armv9.2-a+sme+sme2 | grep -E 'ARM_FEATURE_(SME|LOCALLY_STREAMING)' | sort || true
 
-          cat >/tmp/rdsvl.c <<'C'
-          #include <stdio.h>
-          int main(){ unsigned long n; __asm__ volatile("smstart sm\n\trdsvl %0, #1\n\tsmstop sm" : "=r"(n) :: "memory"); printf("RDSVL_OK bytes=%lu\n",n); return 0; }
-          C
-
-          cat >/tmp/cntd.c <<'C'
-          #include <stdio.h>
-          int main(){ unsigned long n; __asm__ volatile("smstart sm\n\tcntd %0\n\tsmstop sm" : "=r"(n) :: "memory"); printf("CNTD_OK lanes=%lu\n",n); return 0; }
-          C
-
-          cat >/tmp/svcntd.cpp <<'C'
+          cat >/tmp/local.cpp <<'C'
           #include <arm_sve.h>
           #include <cstdio>
-          static size_t f() __arm_streaming;
-          static size_t f() __arm_streaming { return svcntd(); }
-          int main(){ std::printf("SVCNTD_OK lanes=%zu\n",f()); }
-          C
-
-          cat >/tmp/abs.cpp <<'C'
-          #include <arm_sve.h>
-          #include <cstdio>
-          static void f(const double*a,double*b) __arm_streaming;
-          static void f(const double*a,double*b) __arm_streaming { auto p=svptrue_b64(); auto z=svld1_f64(p,a); z=svabs_f64_x(p,z); svst1_f64(p,b,z); }
-          int main(){ double a[8]={-1,-2,-3,-4,-5,-6,-7,-8},b[8]={}; f(a,b); std::printf("ABS_OK %.1f %.1f\n",b[0],b[7]); }
-          C
-
-          cat >/tmp/bitwise.cpp <<'C'
-          #include <arm_sve.h>
-          #include <cstdio>
-          static void f(const uint64_t*a,uint64_t*b) __arm_streaming;
-          static void f(const uint64_t*a,uint64_t*b) __arm_streaming { auto p=svptrue_b64(); auto z=svld1_u64(p,a); z=svand_n_u64_x(p,z,0x7fffffffffffffffULL); z=svlsl_n_u64_x(p,z,1); svst1_u64(p,b,z); }
-          int main(){ uint64_t a[8]={1,2,3,4,5,6,7,8},b[8]={}; f(a,b); std::printf("BITWISE_OK %llu %llu\n",(unsigned long long)b[0],(unsigned long long)b[7]); }
-          C
-
-          cat >/tmp/cmp.cpp <<'C'
-          #include <arm_sve.h>
-          #include <cstdio>
-          static int f(const uint64_t*a) __arm_streaming;
-          static int f(const uint64_t*a) __arm_streaming { auto p=svptrue_b64(); auto z=svld1_u64(p,a); auto q=svcmpge_n_u64(p,z,7); return svptest_any(p,q); }
-          int main(){ uint64_t a[8]={1,2,3,4,5,6,7,8}; std::printf("CMP_OK %d\n",f(a)); }
-          C
-
-          cat >/tmp/fp.cpp <<'C'
-          #include <arm_sve.h>
-          #include <cstdio>
-          static void f(const double*a,double*b) __arm_streaming;
-          static void f(const double*a,double*b) __arm_streaming { auto p=svptrue_b64(); auto z=svld1_f64(p,a); z=svmul_n_f64_x(p,z,2.0); z=svadd_n_f64_x(p,z,1.0); z=svsub_n_f64_x(p,z,0.5); svst1_f64(p,b,z); }
-          int main(){ double a[8]={1,2,3,4,5,6,7,8},b[8]={}; f(a,b); std::printf("FP_OK %.1f %.1f\n",b[0],b[7]); }
-          C
-
-          run_c() {
-            p="$1"
-            echo "--- compile $p ---"
-            clang -O2 -march=armv9.2-a+sme+sme2 /tmp/$p.c -o /tmp/$p || { echo "$p COMPILE_FAIL"; return; }
-            echo "--- run $p ---"
-            set +e; /tmp/$p; rc=$?; set -e
-            echo "$p rc=$rc"
+          #include <cstdint>
+          __arm_locally_streaming static void f(const double*a,double*b, unsigned long* lanes) {
+              auto p=svptrue_b64();
+              *lanes=svcntd();
+              auto z=svld1_f64(p,a);
+              z=svabs_f64_x(p,z);
+              z=svmul_n_f64_x(p,z,2.0);
+              z=svadd_n_f64_x(p,z,1.0);
+              svst1_f64(p,b,z);
           }
-          run_cpp() {
-            p="$1"
+          int main(){ double a[8]={-1,-2,-3,-4,-5,-6,-7,-8},b[8]={}; unsigned long n=0; f(a,b,&n); std::printf("LOCAL_OK lanes=%lu %.1f %.1f\n",n,b[0],b[7]); }
+          C
+
+          cat >/tmp/local_bits.cpp <<'C'
+          #include <arm_sve.h>
+          #include <cstdio>
+          #include <cstdint>
+          __arm_locally_streaming static int f(const uint64_t*a,uint64_t*b) {
+              auto p=svptrue_b64();
+              auto z=svld1_u64(p,a);
+              z=svand_n_u64_x(p,z,0x7fffffffffffffffULL);
+              z=svlsl_n_u64_x(p,z,1);
+              svst1_u64(p,b,z);
+              auto q=svcmpge_n_u64(p,z,14);
+              return svptest_any(p,q);
+          }
+          int main(){ uint64_t a[8]={1,2,3,4,5,6,7,8},b[8]={}; int q=f(a,b); std::printf("LOCAL_BITS_OK %llu %llu q=%d\n",(unsigned long long)b[0],(unsigned long long)b[7],q); }
+          C
+
+          for p in local local_bits; do
             echo "--- compile $p ---"
-            clang++ -O2 -std=c++20 -march=armv9.2-a+sme+sme2 /tmp/$p.cpp -o /tmp/$p || { echo "$p COMPILE_FAIL"; return; }
-            echo "--- asm $p ---"
+            clang++ -O2 -std=c++20 -march=armv9.2-a+sme+sme2 /tmp/$p.cpp -o /tmp/$p || { echo "$p COMPILE_FAIL"; continue; }
             clang++ -O2 -std=c++20 -march=armv9.2-a+sme+sme2 -S /tmp/$p.cpp -o /tmp/$p.s
-            grep -Ei 'smstart|smstop|cntd|rdsvl|abs|and|lsl|cmp|ptest|fmla|fmul|fadd|fsub' /tmp/$p.s | head -80 || true
+            echo "--- asm $p ---"
+            grep -n -Ei 'smstart|smstop|cntd|ptrue|ld1d|st1d|fabs|and|lsl|cmp|ptest|fadd|fmul' /tmp/$p.s | head -120 || true
             echo "--- run $p ---"
             set +e; /tmp/$p; rc=$?; set -e
             echo "$p rc=$rc"
-          }
-
-          run_c rdsvl
-          run_c cntd
-          for p in svcntd abs bitwise cmp fp; do run_cpp "$p"; done
+          done
