@@ -1,0 +1,94 @@
+name: Apple COS53 single-thread 1M kernel diagnostic
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-single1m-kernel-diagnostic-20260906
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen DESTINY untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESTINY=f3288a1faf54d7b352bd564ae8760ddb35ce1892
+          git merge-base --is-ancestor "$DESTINY" HEAD
+          git diff --name-only "$DESTINY"...HEAD | grep -v '^.github/workflows/apple-cos53-single1m-kernel-diagnostic.yml$' | (! read)
+
+      - name: Build exact DESTINY stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh build
+          test -x /tmp/apple_cos53_hotloop_bench
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Validate unchanged math
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh validate
+
+      - name: Paired single-thread 1M benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          : > "$OUT"
+          n=1000000
+          for r in 1 2 3 4 5; do
+            if (( r % 2 )); then seq=(DESTINY_SINGLE APPLE); else seq=(APPLE DESTINY_SINGLE); fi
+            for who in "${seq[@]}"; do
+              case "$who" in
+                DESTINY_SINGLE) /tmp/apple_cos53_hotloop_bench single "$n" ;;
+                APPLE) /tmp/apple_cos53_off_frozen apple "$n" ;;
+              esac \
+                | sed -E "s/stack=[^ ]+/stack=$who/" \
+                | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" \
+                | tee -a "$OUT"
+            done
+          done
+
+      - name: Probe hardware counter availability
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/out
+          {
+            echo '=== xctrace templates ==='
+            xcrun xctrace list templates || true
+            echo '=== CPU Counters attempt: DESTINY single ==='
+            rm -rf /tmp/destiny_single.trace
+            xcrun xctrace record --template 'CPU Counters' --output /tmp/destiny_single.trace --launch -- /tmp/apple_cos53_hotloop_bench single 1000000 || true
+            if [[ -d /tmp/destiny_single.trace ]]; then
+              xcrun xctrace export --input /tmp/destiny_single.trace --toc || true
+            fi
+            echo '=== CPU Counters attempt: Apple ==='
+            rm -rf /tmp/apple_single.trace
+            xcrun xctrace record --template 'CPU Counters' --output /tmp/apple_single.trace --launch -- /tmp/apple_cos53_off_frozen apple 1000000 || true
+            if [[ -d /tmp/apple_single.trace ]]; then
+              xcrun xctrace export --input /tmp/apple_single.trace --toc || true
+            fi
+          } 2>&1 | tee /tmp/out/counters.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-single1m-kernel-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
