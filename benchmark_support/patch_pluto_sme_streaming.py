@@ -4,23 +4,20 @@ import sys
 p=Path(sys.argv[1])
 s=p.read_text()
 
-# Real SME/ZA experiment. Keep PLUTO reduction, LUT and repair semantics frozen;
-# only map the hot polynomial evaluation onto the M4 FP64 ZA matrix engine.
+# Real SME/ZA experiment. Keep PLUTO reduction, LUT, repair semantics, and Horner
+# rounding order frozen; only execute the three polynomial FMAs through FP64 ZA.
 s=s.replace('#include <arm_sve.h>\n', '#include <arm_sve.h>\n#include <arm_sme.h>\n', 1)
 
-# Apple clang 17 on the Namespace M4 rejects __arm_new("za") here.  Use an
-# explicit ordinary-C assembly entry that owns SM+ZA, and make the body a
-# streaming ZA-sharing function.  This mirrors the ABI pattern already proven on
-# this runner, now with ZA enabled as well as streaming mode.
+# Apple clang 17 on Namespace rejects __arm_new("za") in the locally-streaming
+# declaration used here. Enter SM+ZA in the assembly wrapper and share ZA with
+# this streaming body.
 old_sig='''__arm_locally_streaming static size_t pluto_sme_core(const double* __restrict x,double* __restrict y,size_t n,uint64_t* __restrict repairs){'''
 new_sig='''extern "C" size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,size_t n,uint64_t* __restrict repairs) __arm_streaming __arm_inout("za");\nextern "C" size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,size_t n,uint64_t* __restrict repairs) __arm_streaming __arm_inout("za") {'''
 assert old_sig in s
 s=s.replace(old_sig,new_sig,1)
 
-# M4 streaming vector length is 64 bytes = 8 FP64 lanes. SME_FA64 is absent on
-# this runner, so retain exact scalar AoS LUT staging instead of wide gathers.
 old='''    size_t nr=0;\n    for(size_t i=0;i<n;i+=svcntd()){'''
-new='''    size_t nr=0;\n    alignas(64) uint64_t ji_tmp[8];\n    alignas(64) uint64_t c0_bits[8];\n    alignas(64) uint64_t c1_bits[8];\n    alignas(64) uint64_t qbits_tmp[8];\n    alignas(64) double delta_tmp[8];\n    alignas(64) double za_rows[8][8];\n    alignas(64) double p_tmp[8];\n    const uint64_t* coeff_bits=reinterpret_cast<const uint64_t*>(opt_cos53_coeff_aos);\n    for(size_t i=0;i<n;i+=8){'''
+new='''    size_t nr=0;\n    alignas(64) uint64_t ji_tmp[8];\n    alignas(64) uint64_t c0_bits[8];\n    alignas(64) uint64_t c1_bits[8];\n    alignas(64) uint64_t qbits_tmp[8];\n    alignas(64) double delta_tmp[8];\n    alignas(64) double za_rows[8][8];\n    alignas(64) double p_tmp[8];\n    const uint64_t* coeff_bits=reinterpret_cast<const uint64_t*>(opt_cos53_coeff_aos);\n    const svuint64_t lane_id=svindex_u64(0,1);\n    for(size_t i=0;i<n;i+=8){'''
 assert old in s
 s=s.replace(old,new,1)
 
@@ -29,17 +26,20 @@ new='''        svst1_u64(pg,ji_tmp,jidx);\n        svst1_u64(pg,qbits_tmp,qbits)
 assert old in s
 s=s.replace(old,new,1)
 
-# Same cubic PLUTO polynomial, regrouped into two coefficient/basis products:
-#   p = c0*(1 + MH*d^2) + c1*(d + M6*d^3)
-# The two products are accumulated by genuine FP64 FMOPA into ZA. We extract
-# only the diagonal, which corresponds to independent input lanes. The existing
-# <=2 ULP MPFR gate decides whether this regrouping is acceptable.
+# Exact original Horner:
+#   c2 = c0*MH; c3 = c1*M6
+#   p = fma(c3,d,c2)
+#   p = fma(p,d,c1)
+#   p = fma(p,d,c0)
+# Each FMA is reproduced on the ZA diagonal. We seed the diagonal with the addend
+# using predicated row writes, FMOPA the multiplicand vectors, then read back only
+# the diagonal for the next Horner stage. This preserves the original operation
+# ordering instead of algebraically regrouping the polynomial.
 old='''        svfloat64_t c2=svmul_n_f64_x(pg,c0,MH); svfloat64_t c3=svmul_n_f64_x(pg,c1,M6); svfloat64_t p=svmla_f64_x(pg,c2,c3,delta); p=svmla_f64_x(pg,c1,p,delta); p=svmla_f64_x(pg,c0,p,delta);\n        svuint64_t parity=svand_u64_x(pg,qbits,oneu); svuint64_t outsign=svlsl_n_u64_x(pg,parity,63); p=svreinterpret_f64_u64(sveor_u64_x(pg,svreinterpret_u64_f64(p),outsign)); svst1_f64(pg,y+i,p);\n'''
 assert old in s
-new='''        svfloat64_t d2=svmul_f64_x(pg2,delta,delta);\n        svfloat64_t basis0=svmla_n_f64_x(pg2,svdup_n_f64(1.0),d2,MH);\n        svfloat64_t d3=svmul_f64_x(pg2,d2,delta);\n        svfloat64_t basis1=svmla_n_f64_x(pg2,delta,d3,M6);\n        svzero_za();\n        svmopa_za64_f64_m(0,pg2,pg2,c0,basis0);\n        svmopa_za64_f64_m(0,pg2,pg2,c1,basis1);\n        for(uint64_t r=0;r<lanes;r++) svst1_hor_za64(0,(uint32_t)r,pg2,za_rows[r]);\n        for(uint64_t l=0;l<lanes;l++) p_tmp[l]=za_rows[l][l];\n        svfloat64_t p=svld1_f64(pg2,p_tmp);\n        svuint64_t parity=svand_u64_x(pg2,qbits,oneu); svuint64_t outsign=svlsl_n_u64_x(pg2,parity,63); p=svreinterpret_f64_u64(sveor_u64_x(pg2,svreinterpret_u64_f64(p),outsign)); svst1_f64(pg2,y+i,p);\n'''
+new='''        svfloat64_t c2=svmul_n_f64_x(pg2,c0,MH);\n        svfloat64_t c3=svmul_n_f64_x(pg2,c1,M6);\n\n        svzero_za();\n        for(uint64_t r=0;r<lanes;r++){ svbool_t diag=svcmpeq_n_u64(pg2,lane_id,r); svwrite_hor_za64_f64_m(0,(uint32_t)r,diag,c2); }\n        svmopa_za64_f64_m(0,pg2,pg2,c3,delta);\n        for(uint64_t r=0;r<lanes;r++) svst1_hor_za64(0,(uint32_t)r,pg2,za_rows[r]);\n        for(uint64_t l=0;l<lanes;l++) p_tmp[l]=za_rows[l][l];\n        svfloat64_t p=svld1_f64(pg2,p_tmp);\n\n        svzero_za();\n        for(uint64_t r=0;r<lanes;r++){ svbool_t diag=svcmpeq_n_u64(pg2,lane_id,r); svwrite_hor_za64_f64_m(0,(uint32_t)r,diag,c1); }\n        svmopa_za64_f64_m(0,pg2,pg2,p,delta);\n        for(uint64_t r=0;r<lanes;r++) svst1_hor_za64(0,(uint32_t)r,pg2,za_rows[r]);\n        for(uint64_t l=0;l<lanes;l++) p_tmp[l]=za_rows[l][l];\n        p=svld1_f64(pg2,p_tmp);\n\n        svzero_za();\n        for(uint64_t r=0;r<lanes;r++){ svbool_t diag=svcmpeq_n_u64(pg2,lane_id,r); svwrite_hor_za64_f64_m(0,(uint32_t)r,diag,c0); }\n        svmopa_za64_f64_m(0,pg2,pg2,p,delta);\n        for(uint64_t r=0;r<lanes;r++) svst1_hor_za64(0,(uint32_t)r,pg2,za_rows[r]);\n        for(uint64_t l=0;l<lanes;l++) p_tmp[l]=za_rows[l][l];\n        p=svld1_f64(pg2,p_tmp);\n\n        svuint64_t parity=svand_u64_x(pg2,qbits,oneu); svuint64_t outsign=svlsl_n_u64_x(pg2,parity,63); p=svreinterpret_f64_u64(sveor_u64_x(pg2,svreinterpret_u64_f64(p),outsign)); svst1_f64(pg2,y+i,p);\n'''
 s=s.replace(old,new,1)
 
-# Repair detection is already fused into scalar LUT staging.
 old='''        svbool_t rp=svcmpge_n_u64(pg,jidx,2009); uint64_t cnt=svcntp_b64(pg,rp);\n        if(cnt){svuint64_t lane=svindex_u64((uint64_t)i,1); svuint64_t packed=svcompact_u64(rp,lane); svbool_t cp=svwhilelt_b64((uint64_t)0,cnt); svst1_u64(cp,repairs+nr,packed); nr+=cnt;}\n'''
 assert old in s
 s=s.replace(old,'',1)
@@ -54,6 +54,6 @@ assert old in s
 s=s.replace(old,new,1)
 
 s=s.replace('// SME integration: the same PLUTO arithmetic in SME streaming mode. On M4 Pro\n// the streaming vector length is 512 bits, so this processes 8 binary64 lanes.\n// ZA is deliberately not used: PLUTO is lane-wise with indexed LUT loads, so\n// forcing an outer-product/tile formulation would change the computation rather\n// than accelerate it. SSVE is the elementwise execution engine supplied by SME.',
-'''// SME/ZA integration: exact frozen PLUTO reduction and LUT machinery, with the\n// polynomial batch mapped to the M4 FP64 ZA matrix engine via FMOPA.''')
+'''// SME/ZA integration: frozen PLUTO reduction/LUT plus original Horner rounding,\n// with all three polynomial FMAs executed on the M4 FP64 ZA matrix engine.''')
 
 p.write_text(s)
