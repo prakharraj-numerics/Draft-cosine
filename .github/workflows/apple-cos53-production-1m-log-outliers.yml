@@ -1,15 +1,15 @@
-name: Apple COS53 candidate full ladder vs Apple M1
+name: Apple COS53 WORK full ladder verify
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - exp/apple-cos53-cpu-pockets-v1-20260906
+      - verify/apple-cos53-WORK-full-ladder-20260906
     paths:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-candidate-full-ladder
+  group: apple-cos53-work-full-ladder-verify
   cancel-in-progress: true
 
 jobs:
@@ -25,14 +25,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build current frozen baseline lineage and candidate map
+      - name: Prove code-under-test is exact WORK
         shell: bash
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor b47b2fff19ad2c323de8ded704cb6ddc6573541c HEAD
+          WORK=2daf7bd0a5a08df06efd169b1c38b55569de32f7
+          git diff --exit-code "$WORK" HEAD -- . ':(exclude).github/workflows/apple-cos53-production-1m-log-outliers.yml'
           bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh build
 
-      - name: Assert candidate routing
+      - name: Assert frozen WORK routing
         shell: bash
         run: |
           set -euo pipefail
@@ -44,7 +45,7 @@ jobs:
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 500000)" == frozen_baseline ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 1000000)" == wg3_default_s8 ]]
 
-      - name: Validate unchanged hot kernels
+      - name: Validate WORK kernels
         if: matrix.slot == 1
         shell: bash
         run: |
@@ -55,7 +56,7 @@ jobs:
           bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate off
           bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy_off.txt
 
-      - name: Benchmark full candidate ladder against Apple vvcos
+      - name: Benchmark exact WORK vs Apple vvcos
         shell: bash
         run: |
           set -euo pipefail
@@ -66,11 +67,11 @@ jobs:
           for r in 1 2 3; do
             for n in "${sizes[@]}"; do
               order=$(( (r + ${{ matrix.slot }} + n) % 2 ))
-              if (( order == 0 )); then seq=(CANDIDATE APPLE); else seq=(APPLE CANDIDATE); fi
+              if (( order == 0 )); then seq=(WORK APPLE); else seq=(APPLE WORK); fi
               for who in "${seq[@]}"; do
                 case "$who" in
-                  CANDIDATE)
-                    bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh one "$n" | sed -E 's/stack=[^ ]+/stack=CANDIDATE/' ;;
+                  WORK)
+                    bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh one "$n" | sed -E 's/stack=[^ ]+/stack=WORK/' ;;
                   APPLE)
                     /tmp/apple_cos53_off_frozen apple "$n" | sed -E 's/stack=[^ ]+/stack=APPLE/' ;;
                 esac | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" | tee -a "$OUT"
@@ -80,6 +81,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-candidate-full-ladder-${{ matrix.slot }}
+          name: apple-cos53-work-full-ladder-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
