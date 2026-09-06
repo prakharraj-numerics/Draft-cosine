@@ -26,7 +26,9 @@ jobs:
           set -euo pipefail
           DESTINY=f3288a1faf54d7b352bd564ae8760ddb35ce1892
           git merge-base --is-ancestor "$DESTINY" HEAD
-          git diff --name-only "$DESTINY"...HEAD | grep -v '^.github/workflows/apple-cos53-single1m-kernel-diagnostic.yml$' | (! read)
+          git diff --name-only "$DESTINY"...HEAD | sort > /tmp/changed.txt
+          printf '%s\n' '.github/workflows/apple-cos53-single1m-kernel-diagnostic.yml' > /tmp/allowed.txt
+          diff -u /tmp/allowed.txt /tmp/changed.txt
 
       - name: Build exact DESTINY stack
         shell: bash
