@@ -1,5 +1,6 @@
 name: Apple COS53 canonical CPU v2 robust
 
+# Final candidate: 30K remains canonical after pooled-median regression.
 on:
   workflow_dispatch:
   push:
@@ -59,7 +60,7 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/out
           OUT=/tmp/out/results.txt
-          echo "slot=${{ matrix.slot }} canonical_sha=14c74c60c3d2507033c49fff10382ccc11c308e1 robust_source=ee1b22752c75043ebb1715f98e1aa9e9d0e47e67" > "$OUT"
+          echo "slot=${{ matrix.slot }} canonical_sha=14c74c60c3d2507033c49fff10382ccc11c308e1 robust_source=2c937487c054e719c4fabf5bf429220646c3774e" > "$OUT"
           sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 100000 200000 500000 1000000)
           canonical_mode() {
             case "$1" in
