@@ -16,9 +16,7 @@ if [[ "$MODE" == build ]]; then
   [[ "$(uname -m)" == arm64 ]]
   [[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]
 
-  # Builds exact REST off/fast families and the conversion-free hot-loop/workgroup binaries.
   bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh build
-  # Required by exact REST's special-pocket routes.
   bash benchmark_support/run_apple_cos53_cpu_pocket_attack.sh build
 
   test -x /tmp/apple_cos53_fast_hotapple
@@ -34,10 +32,9 @@ fi
 
 route_for() {
   case "$1" in
-    # Strong dual-win holes from the prior 4-slot x 3-round audit.
-    3000|79000|81000|100000|500000) echo hot_wg3_default ;;
-    # All other requested checkpoints retain exact REST because its specialized
-    # route was already as CPU-efficient or better.
+    # Retained dual-win transfers after the first full-ladder reproduction.
+    3000|81000|100000|500000) echo hot_wg3_default ;;
+    # 79K reverted to REST because the transfer did not reproduce there.
     *) echo REST ;;
   esac
 }
