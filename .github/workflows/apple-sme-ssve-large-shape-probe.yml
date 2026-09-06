@@ -1,0 +1,49 @@
+name: Apple SME SSVE large-shape probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-PLUTO-SME-M4-20260906
+    paths:
+      - .github/workflows/apple-sme-ssve-large-shape-probe.yml
+
+jobs:
+  probe:
+    runs-on: nscloud-macos-tahoe-arm64-12x56
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hardware and real SSVE arithmetic
+        shell: bash
+        run: |
+          set -euo pipefail
+          brand="$(sysctl -n machdep.cpu.brand_string)"
+          echo "BRAND=$brand"
+          echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME)"
+          echo "SME2=$(sysctl -n hw.optional.arm.FEAT_SME2)"
+          echo "SVL=$(sysctl -n hw.optional.arm.sme_max_svl_b)"
+          cat >/tmp/ssve.cpp <<'CPP'
+          #include <arm_sve.h>
+          #include <cstddef>
+          #include <cstdint>
+          extern "C" void ssve_add(const double* a,const double* b,double* c,size_t n) __arm_streaming;
+          extern "C" void ssve_add(const double* a,const double* b,double* c,size_t n) __arm_streaming {
+              size_t vl=svcntd();
+              for(size_t i=0;i<n;i+=vl){
+                  svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);
+                  svfloat64_t x=svld1_f64(pg,a+i);
+                  svfloat64_t y=svld1_f64(pg,b+i);
+                  svfloat64_t z=svadd_f64_x(pg,x,y);
+                  svst1_f64(pg,c+i,z);
+              }
+          }
+          CPP
+          cat >/tmp/main.cpp <<'CPP'
+          #include <cstdio>
+          #include <cstddef>
+          extern "C" void ssve_add(const double*,const double*,double*,size_t);
+          int main(){ alignas(64) double a[16],b[16],c[16]{}; for(int i=0;i<16;i++){a[i]=i+.25;b[i]=2*i+.5;} ssve_add(a,b,c,16); for(int i=0;i<16;i++) if(c[i]!=a[i]+b[i]) return 7; std::printf("SSVE_ARITH_OK c0=%.17g c15=%.17g\n",c[0],c[15]); }
+          CPP
+          clang++ -O2 -std=c++20 -march=armv9.2-a+sme+sme2 -fno-vectorize -fno-slp-vectorize -c /tmp/ssve.cpp -o /tmp/ssve.o
+          clang++ -O2 -std=c++20 -mcpu=native /tmp/main.cpp /tmp/ssve.o -o /tmp/ssve_probe
+          /tmp/ssve_probe
