@@ -5,6 +5,7 @@ on:
     branches: [exp/apple-cos53-PLUTO-SME-M4-20260906]
     paths:
       - benchmark_support/apple_cos53_pluto_sme_m4.cpp
+      - benchmark_support/patch_pluto_sme_streaming.py
       - .github/workflows/apple-cos53-NAMESPACE-PLUTO-SME-benchmark.yml
 permissions:
   contents: read
@@ -23,11 +24,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sysctl -n machdep.cpu.brand_string
-          test "$(sysctl -n hw.optional.arm.FEAT_SME)" = 1
-          test "$(sysctl -n hw.optional.arm.FEAT_SME2)" = 1
-          test "$(sysctl -n hw.optional.arm.sme_max_svl_b)" = 64
-          clang++ --version | head -1
+          brand="$(sysctl -n machdep.cpu.brand_string)"
+          sme="$(sysctl -n hw.optional.arm.FEAT_SME)"
+          sme2="$(sysctl -n hw.optional.arm.FEAT_SME2)"
+          f64="$(sysctl -n hw.optional.arm.FEAT_SME_F64F64)"
+          svl="$(sysctl -n hw.optional.arm.sme_max_svl_b)"
+          echo "chip=$brand" | tee /tmp/hardware.txt
+          echo "SME=$sme SME2=$sme2 SME_F64F64=$f64 max_svl_bytes=$svl" | tee -a /tmp/hardware.txt
+          test "$sme" = 1
+          test "$sme2" = 1
+          test "$f64" = 1
+          test "$svl" -ge 16
+          clang++ --version | head -1 | tee -a /tmp/hardware.txt
       - name: Fetch exact frozen PLUTO coefficient table
         uses: actions/download-artifact@v4
         with:
@@ -41,11 +49,13 @@ jobs:
         run: |
           set -euo pipefail
           test -f /tmp/pluto-art/apple_cos53_coeff_aos.h
+          cp benchmark_support/apple_cos53_pluto_sme_m4.cpp /tmp/pluto_sme_candidate.cpp
+          python3 benchmark_support/patch_pluto_sme_streaming.py /tmp/pluto_sme_candidate.cpp
           clang++ -O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 \
-            -fno-fast-math -ffp-contract=fast -I/tmp/pluto-art \
-            benchmark_support/apple_cos53_pluto_sme_m4.cpp \
+            -fno-fast-math -ffp-contract=off -I/tmp/pluto-art \
+            /tmp/pluto_sme_candidate.cpp \
             -framework Accelerate -pthread -o /tmp/pluto_sme_bench
-          otool -tvV /tmp/pluto_sme_bench | grep -E 'smstart|smstop|ld1d|fmla' | head -80 || true
+          otool -tvV /tmp/pluto_sme_bench | grep -E 'smstart|smstop|ld1d|fmla|rdsvl' | head -120 || true
       - name: Build accuracy validator
         shell: bash
         run: |
@@ -53,9 +63,9 @@ jobs:
           brew list mpfr >/dev/null 2>&1 || brew install mpfr
           MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
           clang++ -O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 \
-            -fno-fast-math -ffp-contract=fast -DOPT_VALIDATE_MPFR \
+            -fno-fast-math -ffp-contract=off -DOPT_VALIDATE_MPFR \
             -I/tmp/pluto-art -I"$MP/include" -I"$GP/include" \
-            benchmark_support/apple_cos53_pluto_sme_m4.cpp \
+            /tmp/pluto_sme_candidate.cpp \
             -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp \
             -o /tmp/pluto_sme_validate
       - name: Accuracy gate <=2 ULP
@@ -108,8 +118,9 @@ jobs:
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: pluto-sme-m4-results
+          name: pluto-sme-apple-silicon-results
           path: |
+            /tmp/hardware.txt
             /tmp/accuracy.txt
             /tmp/raw.txt
             /tmp/summary.tsv
