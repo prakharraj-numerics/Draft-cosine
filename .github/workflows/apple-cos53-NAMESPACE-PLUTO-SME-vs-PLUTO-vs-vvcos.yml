@@ -16,6 +16,7 @@ jobs:
       matrix:
         slot: [1, 2]
     runs-on: nscloud-macos-tahoe-arm64-6x14
+    timeout-minutes: 20
     env:
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
@@ -65,9 +66,12 @@ jobs:
           .globl _pluto_sme_eval_raw
           .p2align 2
           _pluto_sme_eval_raw:
+              stp x29, x30, [sp, #-16]!
+              mov x29, sp
               smstart sm
               bl _pluto_sme_stream
               smstop sm
+              ldp x29, x30, [sp], #16
               ret
           ASM
 
@@ -78,11 +82,7 @@ jobs:
           clang++ $SME_COMMON -I/tmp -c /tmp/pluto_sme_impl.cpp -o /tmp/pluto_sme_impl.o
           clang++ $SME_COMMON -I/tmp -S /tmp/pluto_sme_impl.cpp -o /tmp/pluto_sme_impl.s
           clang -c -march=armv9.2-a+sme+sme2 /tmp/pluto_sme_entry.s -o /tmp/pluto_sme_entry.o
-
-          echo '--- streaming kernel markers ---'
-          grep -Ei 'whilelo|ld1d|st1d|fmla|fmul|fadd' /tmp/pluto_sme_impl.s | head -120 || true
           grep -Eiq 'whilelo|ld1d' /tmp/pluto_sme_impl.s
-          echo '--- raw SME entry ---'
           cat /tmp/pluto_sme_entry.s
 
           clang++ $HOST_COMMON -I/tmp -I/tmp/pthreadpool-install/include \
