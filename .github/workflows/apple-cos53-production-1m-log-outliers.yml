@@ -28,33 +28,44 @@ jobs:
           git merge-base --is-ancestor "$REST" HEAD
           changed="$(git diff --name-only "$REST" HEAD | sort)"
           test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
-      - name: Record live CPU Counters and Time Profiler probes
+      - name: Record finite CPU Counters and Time Profiler probes
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           mkdir -p /tmp/out
-          run_one() {
-            template="$1"; tag="$2"
-            echo "=== RECORD $template ===" | tee -a /tmp/out/live.txt
-            python3 - "$template" "$tag" <<'PY' 2>&1 | tee -a /tmp/out/live.txt
-          import subprocess,sys,os
-          template,tag=sys.argv[1:]
-          out=f'/tmp/out/{tag}.trace'
-          cmd=['xcrun','xctrace','record','--template',template,'--time-limit','2s','--output',out,'--target-stdout','/dev/null','--no-prompt','--launch','--','/usr/bin/yes']
-          try:
-              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=20)
-              print(p.stdout,end=''); print('RC',p.returncode,'TRACE_EXISTS',os.path.exists(out))
-          except subprocess.TimeoutExpired as e:
-              print('TIMEOUT',e.stdout or '')
+          cat >/tmp/cpuburn.py <<'PY'
+          import time, math
+          end=time.monotonic()+1.5
+          x=0.123456789
+          i=0
+          while time.monotonic()<end:
+              x=math.fma(x,1.0000000001,0.0000000003) if hasattr(math,'fma') else x*1.0000000001+0.0000000003
+              i+=1
+          print(i,x)
           PY
-            if [[ -d "/tmp/out/${tag}.trace" ]]; then
-              xcrun xctrace export --input "/tmp/out/${tag}.trace" --toc --output "/tmp/out/${tag}-toc.xml" 2>>/tmp/out/live.txt || true
-              echo "=== TOC $tag ===" >> /tmp/out/live.txt
-              sed -n '1,240p' "/tmp/out/${tag}-toc.xml" >> /tmp/out/live.txt 2>/dev/null || true
-            fi
-          }
-          run_one 'CPU Counters' counters
-          run_one 'Time Profiler' time
+          python3 - <<'PY' | tee /tmp/out/live.txt
+          import subprocess,os
+          for template,tag in [('CPU Counters','counters'),('Time Profiler','time')]:
+              out=f'/tmp/out/{tag}.trace'
+              print(f'=== RECORD {template} ===',flush=True)
+              cmd=['xcrun','xctrace','record','--template',template,'--time-limit','3s','--output',out,'--target-stdout','/dev/null','--no-prompt','--launch','--','/usr/bin/python3','/tmp/cpuburn.py']
+              try:
+                  p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=15)
+                  print(p.stdout,end=''); print('RC',p.returncode,'TRACE_EXISTS',os.path.isdir(out))
+              except subprocess.TimeoutExpired as e:
+                  print('RECORD_TIMEOUT',template,e.stdout or '')
+              if os.path.isdir(out):
+                  toc=f'/tmp/out/{tag}-toc.xml'
+                  try:
+                      p=subprocess.run(['xcrun','xctrace','export','--input',out,'--toc','--output',toc],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=15)
+                      print('EXPORT_RC',p.returncode,p.stdout)
+                      if os.path.exists(toc):
+                          txt=open(toc,errors='replace').read()
+                          print(f'=== TOC {tag} ===')
+                          print(txt[:30000])
+                  except subprocess.TimeoutExpired as e:
+                      print('EXPORT_TIMEOUT',tag,e.stdout or '')
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: apple-cos53-instruments-live-probe
