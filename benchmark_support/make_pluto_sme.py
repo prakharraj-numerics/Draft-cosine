@@ -16,9 +16,11 @@ static void opt_cos53_eval(const double* __restrict x,double* __restrict y,size_
     const svuint64_t jmask = svdup_n_u64((UINT64_C(1)<<52)-1);
     const size_t vl = svcntd();
     alignas(64) uint64_t jt[32];
+    alignas(64) double c0t[32], c1t[32];
 
     for (size_t i=0; i<n; i+=vl) {
         svbool_t pg = svwhilelt_b64((uint64_t)i,(uint64_t)n);
+        const size_t lanes = (n-i < vl) ? (n-i) : vl;
         svfloat64_t xv = svld1_f64(pg,x+i);
         svfloat64_t ax = svabs_f64_x(pg,xv);
 
@@ -50,11 +52,16 @@ static void opt_cos53_eval(const double* __restrict x,double* __restrict y,size_
         delta = svmla_n_f64_x(pg,delta,jd,NINVK_LO);
         delta = svadd_f64_x(pg,delta,al);
 
-        // Streaming-SVE gather: same AoS [c0,c1] table, up to 8 doubles at once on M4 Pro.
-        svuint64_t i0 = svlsl_n_u64_x(pg,ji,1);
-        svuint64_t i1 = svadd_n_u64_x(pg,i0,1);
-        svfloat64_t c0 = svld1_gather_u64index_f64(pg,opt_cos53_coeff_aos,i0);
-        svfloat64_t c1 = svld1_gather_u64index_f64(pg,opt_cos53_coeff_aos,i1);
+        // Streaming SVE on AppleClang does not expose arbitrary memory gather.
+        // Spill the 8 LUT indices, perform the same AoS scalar loads, then reload
+        // contiguous coefficient vectors. All arithmetic remains 512-bit SSVE.
+        svst1_u64(pg,jt,ji);
+        for(size_t k=0;k<lanes;k++) {
+            c0t[k]=opt_cos53_coeff_aos[2*jt[k]];
+            c1t[k]=opt_cos53_coeff_aos[2*jt[k]+1];
+        }
+        svfloat64_t c0 = svld1_f64(pg,c0t);
+        svfloat64_t c1 = svld1_f64(pg,c1t);
 
         svfloat64_t c2 = svmul_n_f64_x(pg,c0,MH);
         svfloat64_t c3 = svmul_n_f64_x(pg,c1,M6);
@@ -70,8 +77,6 @@ static void opt_cos53_eval(const double* __restrict x,double* __restrict y,size_
         // Frozen PLUTO root repair: only affected lanes fall back to scalar cos.
         svbool_t bad = svcmpge_n_u64(pg,ji,2009);
         if (__builtin_expect(svptest_any(pg,bad),0)) {
-            svst1_u64(pg,jt,ji);
-            size_t lanes = (n-i < vl) ? (n-i) : vl;
             for(size_t k=0;k<lanes;k++) if(jt[k]>=2009) y[i+k]=std::cos(x[i+k]);
         }
     }
