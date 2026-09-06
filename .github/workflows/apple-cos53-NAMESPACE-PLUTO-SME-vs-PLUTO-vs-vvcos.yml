@@ -50,7 +50,7 @@ jobs:
               p.write_text(s)
           PY
 
-      - name: Build exact PLUTO and isolated SME kernel
+      - name: Build exact PLUTO and raw-entered SME kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -60,23 +60,39 @@ jobs:
           python3 benchmark_support/make_pluto_sme.py \
             /tmp/kernel_attack_no_p3.cpp /tmp/pluto_sme_harness.cpp /tmp/pluto_sme_impl.cpp
 
+          cat >/tmp/pluto_sme_entry.s <<'ASM'
+          .text
+          .globl _pluto_sme_eval_raw
+          .p2align 2
+          _pluto_sme_eval_raw:
+              smstart sm
+              bl _pluto_sme_stream
+              smstop sm
+              ret
+          ASM
+
           MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
-          SME_COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=off -fno-vectorize -fno-slp-vectorize"
-          HOST_COMMON="-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off"
+          SME_COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
+          HOST_COMMON="-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=fast"
 
           clang++ $SME_COMMON -I/tmp -c /tmp/pluto_sme_impl.cpp -o /tmp/pluto_sme_impl.o
           clang++ $SME_COMMON -I/tmp -S /tmp/pluto_sme_impl.cpp -o /tmp/pluto_sme_impl.s
-          echo '--- SME assembly markers ---'
-          grep -Ei 'smstart|smstop|ld1d|fmla|whilelo|ptrue' /tmp/pluto_sme_impl.s | head -120 || true
-          grep -Eiq 'smstart|smstop' /tmp/pluto_sme_impl.s
+          clang -c -march=armv9.2-a+sme+sme2 /tmp/pluto_sme_entry.s -o /tmp/pluto_sme_entry.o
+
+          echo '--- streaming kernel markers ---'
+          grep -Ei 'whilelo|ld1d|st1d|fmla|fmul|fadd' /tmp/pluto_sme_impl.s | head -120 || true
+          grep -Eiq 'whilelo|ld1d' /tmp/pluto_sme_impl.s
+          echo '--- raw SME entry ---'
+          cat /tmp/pluto_sme_entry.s
 
           clang++ $HOST_COMMON -I/tmp -I/tmp/pthreadpool-install/include \
-            /tmp/pluto_sme_harness.cpp /tmp/pluto_sme_impl.o \
+            /tmp/pluto_sme_harness.cpp /tmp/pluto_sme_impl.o /tmp/pluto_sme_entry.o \
             /tmp/pthreadpool-install/lib/libpthreadpool.a \
             -framework Accelerate -pthread -o /tmp/pluto_sme_bench
 
           clang++ $HOST_COMMON -DOPT_VALIDATE_MPFR -I/tmp -I/tmp/pthreadpool-install/include \
-            -I"$MP/include" -I"$GP/include" /tmp/pluto_sme_harness.cpp /tmp/pluto_sme_impl.o \
+            -I"$MP/include" -I"$GP/include" /tmp/pluto_sme_harness.cpp \
+            /tmp/pluto_sme_impl.o /tmp/pluto_sme_entry.o \
             /tmp/pthreadpool-install/lib/libpthreadpool.a -framework Accelerate -pthread \
             -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/pluto_sme_validate
 
@@ -98,8 +114,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          brand="$(sysctl -n machdep.cpu.brand_string)"
           sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
-          printf 'slot\tround\tn\tstack\twall_ns_el\tcpu_ns_el\n' >/tmp/raw.tsv
+          printf 'slot\tbrand\tround\tn\tstack\twall_ns_el\tcpu_ns_el\n' >/tmp/raw.tsv
           one() {
             local round="$1" n="$2" stack="$3" cmd="$4"
             local out wall cpu
@@ -108,7 +125,7 @@ jobs:
             wall=$(echo "$out" | sed -n 's/.*wall_ns_el=\([0-9.]*\).*/\1/p' | tail -1)
             cpu=$(echo "$out" | sed -n 's/.*cpu_ns_el=\([0-9.]*\).*/\1/p' | tail -1)
             test -n "$wall"; test -n "$cpu"
-            printf '%s\t%s\t%s\t%s\t%s\t%s\n' '${{ matrix.slot }}' "$round" "$n" "$stack" "$wall" "$cpu" >>/tmp/raw.tsv
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' '${{ matrix.slot }}' "$brand" "$round" "$n" "$stack" "$wall" "$cpu" >>/tmp/raw.tsv
           }
           for r in 1 2 3 4 5; do
             for n in "${sizes[@]}"; do
@@ -150,3 +167,4 @@ jobs:
             /tmp/raw.tsv
             /tmp/accuracy.txt
             /tmp/pluto_sme_impl.s
+            /tmp/pluto_sme_entry.s
