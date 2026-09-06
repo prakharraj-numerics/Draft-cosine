@@ -48,8 +48,16 @@ jobs:
               if n:
                   p.write_text(s.replace('2000000/n','400000000/n'))
                   hits += n
-          print('reps_patch_hits',hits)
           assert hits >= 1
+          p=Path('benchmark_support/apple_cos53_highway_benchmark.cpp')
+          s=p.read_text()
+          old1='size_t r=(size_t)12000000/(n*6);'
+          old2='if(r<2)r=2; if(r>30000)r=30000; return r;'
+          assert old1 in s and old2 in s
+          s=s.replace(old1,'size_t r=(size_t)400000000/(n*6);')
+          s=s.replace(old2,'if(r<2)r=2; if(r>4000000)r=4000000; return r;')
+          p.write_text(s)
+          print('REST_reps_patch_hits',hits,'APPLE_vvcos_reps_patch',1)
           PY
           bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh build
           [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 29999)" == pool2 ]]
