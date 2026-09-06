@@ -8,6 +8,7 @@ if [[ "$MODE" == build ]]; then
   test -x /tmp/apple_cos53_canonical_optimized_bench
   bash benchmark_support/run_apple_cos53_apple_specific_eff.sh build
   bash benchmark_support/run_apple_cos53_hotloop_eff.sh build
+  bash benchmark_support/run_apple_cos53_current_p64.sh build
   exit 0
 fi
 
@@ -27,9 +28,28 @@ run_canonical() {
   esac
 }
 
+if [[ "$MODE" == route ]]; then
+  [[ $# -eq 2 ]]
+  n="$2"
+  if (( n >= 78000 && n <= 82000 )); then
+    echo p64
+  else
+    echo canonical
+  fi
+  exit 0
+fi
+
 if [[ "$MODE" == one ]]; then
   [[ $# -eq 2 ]]
   n="$2"
+
+  # Current baseline delta: the paired M1 boundary sweep established a narrow
+  # p64 production zone.  Do this check before all historical point routes so
+  # the 78K-82K interval is unambiguous.
+  if (( n >= 78000 && n <= 82000 )); then
+    exec bash benchmark_support/run_apple_cos53_current_p64.sh one "$n"
+  fi
+
   # Only routes that reproduced as BOTH faster and lower-CPU than canonical
   # in pooled final 12-sample verification are allowed to replace canonical.
   case "$n" in
@@ -46,5 +66,5 @@ if [[ "$MODE" == one ]]; then
   esac
 fi
 
-echo "usage: $0 build | validate | one N" >&2
+echo "usage: $0 build | validate | route N | one N" >&2
 exit 2
