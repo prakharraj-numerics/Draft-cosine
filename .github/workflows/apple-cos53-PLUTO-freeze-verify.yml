@@ -1,0 +1,32 @@
+name: Apple COS53 PLUTO freeze verification
+
+on:
+  push:
+    branches:
+      - freeze/apple-cos53-PLUTO-20260906
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build PLUTO
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO.sh build
+      - name: Validate PLUTO accuracy
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO.sh validate
+      - name: Smoke 1M single-thread
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO.sh one 1000000
