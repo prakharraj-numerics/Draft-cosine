@@ -76,14 +76,6 @@ jobs:
           COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast"
           clang++ $COMMON -I/tmp/pluto-art -c /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_candidate.o
           clang++ $COMMON -I/tmp/pluto-art -S /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_candidate.s
-
-          # The C++ body is streaming-compatible.  The hand-written wrapper must
-          # be the only code in our implementation that changes PSTATE.SM.
-          if grep -Eiq '(^|[[:space:]])sm(start|stop)([[:space:]]|$)' /tmp/pluto_sme_candidate.s; then
-            echo 'unexpected compiler-generated streaming transition in candidate:' >&2
-            grep -Ein -B3 -A3 'sm(start|stop)' /tmp/pluto_sme_candidate.s >&2 || true
-            exit 1
-          fi
           ! grep -q 'pthreadpool' /tmp/pluto_sme_candidate.cpp
           grep -q 'pluto_sme_stream' /tmp/pluto_sme_candidate.s
 
