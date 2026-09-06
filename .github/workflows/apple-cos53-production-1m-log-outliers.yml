@@ -1,4 +1,4 @@
-name: Apple COS53 REST vs Apple Instruments 3K 78K
+name: Apple COS53 exhaustive REST 3K waste audit
 
 on:
   workflow_dispatch:
@@ -9,15 +9,15 @@ on:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-rest-instruments-3k-78k
+  group: apple-cos53-rest-3k-waste-audit
   cancel-in-progress: true
 
 jobs:
-  profile:
+  audit:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1,2]
+        slot: [1,2,3,4]
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -35,124 +35,254 @@ jobs:
           changed="$(git diff --name-only "$REST" HEAD | sort)"
           test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
-      - name: Build exact REST with profiling-only repetition counts
+      - name: Build exact REST and diagnostic ablations
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh build
+          bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
+          bash benchmark_support/run_apple_cos53_cpu_pocket_attack.sh build
+          test -x /tmp/apple_cos53_fast_optimized
+          test -x /tmp/apple_cos53_fast_hotloop
+          test -x /tmp/apple_cos53_fast_hotapple
+          test -x /tmp/apple_cos53_off_frozen
+          test -f /tmp/apple_cos53_cpu_eff.cpp
+          test -f /tmp/apple_cos53_hotloop.cpp
+
           python3 - <<'PY'
           from pathlib import Path
-          hits=0
-          for p in Path('benchmark_support').glob('*.sh'):
-              s=p.read_text(); n=s.count('2000000/n')
-              if n:
-                  p.write_text(s.replace('2000000/n','60000000/n')); hits += n
-          p=Path('benchmark_support/apple_cos53_highway_benchmark.cpp')
-          s=p.read_text(); a=s.count('12000000/(n*6)')
-          if a: p.write_text(s.replace('12000000/(n*6)','60000000/(n*6)'))
-          print('rest_rep_patch_hits',hits,'apple_rep_patch_hits',a)
-          assert hits >= 1 and a >= 1
-          PY
-          bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh build
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 3000)" == WORK ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 78000)" == WORK ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 78000)" == old_wg3_utility ]]
-          # Put the same fast-contract stack that REST uses at both selected points in place.
-          bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
+          base=Path('/tmp/apple_cos53_cpu_eff.cpp').read_text()
+          hot=Path('/tmp/apple_cos53_hotloop.cpp').read_text()
 
-      - name: Record direct-route reference numbers
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/out
-          : > /tmp/out/reference.txt
-          run_ref() {
-            who="$1"; n="$2"
-            if [[ "$who" == REST && "$n" == 3000 ]]; then
-              /tmp/apple_cos53_canonical_optimized_bench auto 3000
-            elif [[ "$who" == REST && "$n" == 78000 ]]; then
-              /tmp/apple_cos53_hotloop_apple_specific_bench wg3_utility 78000
-            else
-              /tmp/apple_cos53_off_frozen apple "$n"
-            fi | sed "s/^/slot=${{ matrix.slot }} who=$who n=$n /" | tee -a /tmp/out/reference.txt
-          }
-          for n in 3000 78000; do
-            if (( (${{ matrix.slot }} + n) % 2 == 0 )); then seq=(REST APPLE); else seq=(APPLE REST); fi
-            for who in "${seq[@]}"; do run_ref "$who" "$n"; done
+          validity='''    uint64x2_t valid=vcleq_f64(ax,vdupq_n_f64(XMAX));
+              if ((vgetq_lane_u64(valid,0)&vgetq_lane_u64(valid,1)) != UINT64_MAX) {
+                  y[0]=std::cos(x[0]); y[1]=std::cos(x[1]); return;
+              }
+
+          '''
+          qold='''    // q = nearest integer to |x|/pi, entirely vectorized.
+              int64x2_t qi=vcvtnq_s64_f64(vmulq_n_f64(ax,INVPI));
+              float64x2_t qd=vcvtq_f64_s64(qi);
+          '''
+          qnew='''    // diagnostic ablation: conversion-free q rounding
+              const float64x2_t magic=vdupq_n_f64(0x1p52);
+              float64x2_t qscaled=vmulq_n_f64(ax,INVPI);
+              float64x2_t qmagic=vaddq_f64(qscaled,magic);
+              float64x2_t qd=vsubq_f64(qmagic,magic);
+              uint64x2_t qbits=vreinterpretq_u64_f64(qmagic);
+          '''
+          jold='''    // K=1280 and |r|<=pi/2 imply j is provably in [0,2011], so no clamps.
+              int64x2_t ji=vcvtnq_s64_f64(vmulq_n_f64(ah,KGRID));
+              const int64_t j0=vgetq_lane_s64(ji,0);
+              const int64_t j1=vgetq_lane_s64(ji,1);
+              float64x2_t jd=vcvtq_f64_s64(ji);
+          '''
+          jnew='''    // diagnostic ablation: conversion-free j rounding/index bits
+              const float64x2_t magic=vdupq_n_f64(0x1p52);
+              float64x2_t jscaled=vmulq_n_f64(ah,KGRID);
+              float64x2_t jmagic=vaddq_f64(jscaled,magic);
+              float64x2_t jd=vsubq_f64(jmagic,magic);
+              uint64x2_t jbits=vreinterpretq_u64_f64(jmagic);
+              constexpr uint64_t JMASK=(UINT64_C(1)<<52)-1;
+              const uint64_t j0=vgetq_lane_u64(jbits,0)&JMASK;
+              const uint64_t j1=vgetq_lane_u64(jbits,1)&JMASK;
+          '''
+          parityold='''    // (-1)^q sign without scalar q extraction.
+              uint64x2_t parity=vandq_u64(vreinterpretq_u64_s64(qi),vdupq_n_u64(1));
+          '''
+          paritynew='''    // (-1)^q from magic-biased low bit.
+              uint64x2_t parity=vandq_u64(qbits,vdupq_n_u64(1));
+          '''
+          roots='''    if (__builtin_expect(j0 >= 2009, 0)) y[0]=std::cos(x[0]);
+              if (__builtin_expect(j1 >= 2009, 0)) y[1]=std::cos(x[1]);
+          '''
+
+          assert validity in base and qold in base and jold in base and parityold in base
+
+          def eval_replace(s, unroll, restrict=False):
+              a=s.index('static inline void opt_cos53_eval(')
+              b=s.index('\nclass Adaptive2',a)
+              r=' __restrict' if restrict else ''
+              sig=f'''static inline void opt_cos53_eval(const double*{r} x,double*{r} y,size_t n)\n{{\n'''
+              body='    size_t i=0;\n'
+              body+=f'    for (; i+{unroll}<=n; i+={unroll}) {{\n'
+              for off in range(0,unroll,2): body+=f'        opt_pair(x+i+{off},y+i+{off});\n'
+              body+='    }\n    for (; i+2<=n; i+=2) opt_pair(x+i,y+i);\n'
+              body+='    if (i<n) { double xx[2]={x[i],x[i]}, yy[2]; opt_pair(xx,yy); y[i]=yy[0]; }\n}\n'
+              return s[:a]+sig+body+s[b:]
+
+          def magic_q(s):
+              assert qold in s and parityold in s
+              return s.replace(qold,qnew,1).replace(parityold,paritynew,1)
+          def magic_j(s):
+              assert jold in s
+              # If q magic already exists, reuse its magic variable rather than redeclare.
+              repl=jnew if 'const float64x2_t magic=vdupq_n_f64(0x1p52);' not in s else jnew.replace('    const float64x2_t magic=vdupq_n_f64(0x1p52);\n','',1)
+              return s.replace(jold,repl,1)
+
+          variants={}
+          variants['novalid']=base.replace(validity,'',1)
+          variants['magicq']=magic_q(base)
+          variants['magicj']=magic_j(base)
+          variants['restrict']=base.replace('static inline void opt_cos53_eval(const double* x,double* y,size_t n)',
+                                             'static inline void opt_cos53_eval(const double* __restrict x,double* __restrict y,size_t n)',1)
+          variants['unroll8']=eval_replace(base,8,False)
+          qj=magic_j(magic_q(base)); variants['qj']=qj
+          variants['qj_novalid']=qj.replace(validity,'',1)
+          variants['unroll8_restrict']=eval_replace(base,8,True)
+          assert roots in hot
+          variants['hot_noroot']=hot.replace(roots,'',1)
+          variants['hot_u16']=eval_replace(hot,16,True)
+          variants['hot_u32']=eval_replace(hot,32,True)
+          for name,s in variants.items():
+              Path(f'/tmp/ab_{name}.cpp').write_text(s)
+          print('ABLATIONS', ' '.join(sorted(variants)))
+          PY
+
+          COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=fast'
+          for v in novalid magicq magicj restrict unroll8 qj qj_novalid unroll8_restrict hot_noroot hot_u16 hot_u32; do
+            clang++ $COMMON -I/tmp -I/tmp/pthreadpool-install/include \
+              "/tmp/ab_${v}.cpp" /tmp/pthreadpool-install/lib/libpthreadpool.a \
+              -framework Accelerate -pthread -o "/tmp/ab_${v}"
           done
 
-      - name: Time Profiler direct executables
+      - name: Validate unchanged full hot kernel
+        if: matrix.slot == 1
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY' | tee /tmp/out/xctrace-status.txt
-          import subprocess,os
-          slot=${{ matrix.slot }}
-          cases=[('REST',3000),('APPLE',3000),('REST',78000),('APPLE',78000)]
-          if slot % 2 == 0: cases=list(reversed(cases))
-          for who,n in cases:
-              tag=f'{who.lower()}_{n}'
-              trace=f'/tmp/out/{tag}.trace'
-              stdout=f'/tmp/out/{tag}.run.txt'
-              if who=='REST' and n==3000:
-                  target=['/tmp/apple_cos53_canonical_optimized_bench','auto','3000']
-              elif who=='REST' and n==78000:
-                  target=['/tmp/apple_cos53_hotloop_apple_specific_bench','wg3_utility','78000']
-              else:
-                  target=['/tmp/apple_cos53_off_frozen','apple',str(n)]
-              cmd=['xcrun','xctrace','record','--template','Time Profiler','--time-limit','10s',
-                   '--output',trace,'--target-stdout',stdout,'--no-prompt','--launch','--']+target
-              print('RECORD',who,n,' '.join(target),flush=True)
-              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=25)
-              print(p.stdout,end=''); print('RC',p.returncode,'trace',os.path.isdir(trace),flush=True)
-              if p.returncode != 0 or not os.path.isdir(trace): raise SystemExit(f'record failed {who} {n}')
-              toc=f'/tmp/out/{tag}-toc.xml'
-              ep=subprocess.run(['xcrun','xctrace','export','--input',trace,'--toc','--output',toc],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=30)
-              print('TOC',tag,'rc',ep.returncode,'bytes',os.path.getsize(toc) if os.path.exists(toc) else -1)
-              if ep.stdout: print(ep.stdout,end='')
-              # Discover exact data-table schema names from TOC, then export the available Time Profiler table(s).
-              if os.path.exists(toc):
-                  txt=open(toc,errors='replace').read()
-                  for schema in ('time-profile','time-sample'):
-                      if f'schema="{schema}"' not in txt: continue
-                      out=f'/tmp/out/{tag}-{schema}.xml'
-                      xpath=f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]'
-                      xp=subprocess.run(['xcrun','xctrace','export','--input',trace,'--xpath',xpath,'--output',out],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=30)
-                      print('EXPORT',tag,schema,'rc',xp.returncode,'bytes',os.path.getsize(out) if os.path.exists(out) else -1)
-                      if xp.stdout: print(xp.stdout,end='')
-          PY
+          bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy.txt
 
-      - name: Capture ARM64 disassembly and hot-function summary
-        if: always()
+      - name: Exhaustive paired 3K waste matrix
         shell: bash
         run: |
-          set -u
-          mkdir -p /tmp/out
-          {
-            echo '=== 3K REST binary ==='; nm -nm /tmp/apple_cos53_canonical_optimized_bench || true
-            echo '=== 78K REST binary ==='; nm -nm /tmp/apple_cos53_hotloop_apple_specific_bench || true
-            echo '=== Apple wrapper ==='; nm -nm /tmp/apple_cos53_off_frozen || true
-          } > /tmp/out/symbols.txt 2>&1
-          otool -tvV /tmp/apple_cos53_canonical_optimized_bench > /tmp/out/rest3k-disasm.txt 2>&1 || true
-          otool -tvV /tmp/apple_cos53_hotloop_apple_specific_bench > /tmp/out/rest78k-disasm.txt 2>&1 || true
-          otool -tvV /tmp/apple_cos53_off_frozen > /tmp/out/apple-disasm.txt 2>&1 || true
-          python3 - <<'PY' > /tmp/out/hot-function-summary.txt
-          import re
-          cases=[('REST_3K','/tmp/out/rest3k-disasm.txt',0x100006cd0,0x1000073bc),('REST_78K','/tmp/out/rest78k-disasm.txt',0x100004b68,0x100005690)]
-          pats={'FMA':r'\b(?:fmla|fmls|fmadd|fmsub|fnmadd|fnmsub)\b','FMUL':r'\bfmul\b','LOAD':r'\b(?:ldr|ldp|ld1|ldur)\b','STORE':r'\b(?:str|stp|st1|stur)\b','FP_INT_CONV':r'\b(?:fcvt\w*|scvtf|ucvtf)\b','BRANCH':r'\b(?:b\.|b\s|bl\s|blr\s|cbz\s|cbnz\s|tbz\s|tbnz\s)'}
-          for name,path,a,b in cases:
-              ins=[]
-              for line in open(path,errors='replace'):
-                  m=re.match(r'^([0-9a-fA-F]{16})\s+(.+)$',line)
-                  if m and a<=int(m.group(1),16)<b: ins.append(m.group(2).lower())
-              txt='\n'.join(ins)
-              mem=[x for x in ins if re.match(r'^(?:ldr|ldp|ld1|ldur|str|stp|st1|stur)\b',x)]
-              print(name,'bytes',b-a,'static_instructions',len(ins),'stack_mem_ops',sum('[sp' in x for x in mem))
-              for k,p in pats.items(): print(k,len(re.findall(p,txt)))
+          set -euo pipefail
+          OUT=/tmp/out/matrix.txt
+          : > "$OUT"
+          candidates=(
+            REST_CURRENT OLD_SINGLE OLD_ADAPT2 OLD_POOL2 OLD_POOL3
+            ABL_NOVALID ABL_MAGICQ ABL_MAGICJ ABL_RESTRICT ABL_UNROLL8 ABL_QJ ABL_QJ_NOVALID ABL_UNROLL8_RESTRICT
+            HOT_SINGLE HOT_ADAPT2 HOT_POOL2 HOT_POOL3 HOT_AUTO HOT_NOROOT HOT_U16 HOT_U32
+            SINGLE_UI SINGLE_USER SINGLE_DEFAULT SINGLE_UTILITY
+            WG2_UI WG2_USER WG2_DEFAULT WG2_UTILITY WG3_UI WG3_USER WG3_DEFAULT WG3_UTILITY
+            AP2 AP3 AP4
+          )
+          for p in 2 3 4; do
+            for q in UI USER DEFAULT UTILITY; do
+              for s in 0 8 32 96; do candidates+=("TWG${p}_${q}_S${s}"); done
+            done
+          done
+          for p in 1 2 3 4 8 16 32 64; do candidates+=("DAP${p}"); done
+
+          run_cand() {
+            c="$1"
+            case "$c" in
+              REST_CURRENT) /tmp/apple_cos53_fast_optimized auto 3000 ;;
+              OLD_SINGLE) /tmp/apple_cos53_fast_optimized single 3000 ;;
+              OLD_ADAPT2) /tmp/apple_cos53_fast_optimized adapt2 3000 ;;
+              OLD_POOL2) /tmp/apple_cos53_fast_optimized pool2 3000 ;;
+              OLD_POOL3) /tmp/apple_cos53_fast_optimized pool3 3000 ;;
+              ABL_NOVALID) /tmp/ab_novalid single 3000 ;;
+              ABL_MAGICQ) /tmp/ab_magicq single 3000 ;;
+              ABL_MAGICJ) /tmp/ab_magicj single 3000 ;;
+              ABL_RESTRICT) /tmp/ab_restrict single 3000 ;;
+              ABL_UNROLL8) /tmp/ab_unroll8 single 3000 ;;
+              ABL_QJ) /tmp/ab_qj single 3000 ;;
+              ABL_QJ_NOVALID) /tmp/ab_qj_novalid single 3000 ;;
+              ABL_UNROLL8_RESTRICT) /tmp/ab_unroll8_restrict single 3000 ;;
+              HOT_SINGLE) /tmp/apple_cos53_fast_hotloop single 3000 ;;
+              HOT_ADAPT2) /tmp/apple_cos53_fast_hotloop adapt2 3000 ;;
+              HOT_POOL2) /tmp/apple_cos53_fast_hotloop pool2 3000 ;;
+              HOT_POOL3) /tmp/apple_cos53_fast_hotloop pool3 3000 ;;
+              HOT_AUTO) /tmp/apple_cos53_fast_hotloop auto 3000 ;;
+              HOT_NOROOT) /tmp/ab_hot_noroot single 3000 ;;
+              HOT_U16) /tmp/ab_hot_u16 single 3000 ;;
+              HOT_U32) /tmp/ab_hot_u32 single 3000 ;;
+              SINGLE_*) q="${c#SINGLE_}"; /tmp/apple_cos53_fast_hotapple "single_${q,,}" 3000 ;;
+              WG2_*) q="${c#WG2_}"; /tmp/apple_cos53_fast_hotapple "wg2_${q,,}" 3000 ;;
+              WG3_*) q="${c#WG3_}"; /tmp/apple_cos53_fast_hotapple "wg3_${q,,}" 3000 ;;
+              AP2) /tmp/apple_cos53_cpu_pocket_attack ap2 3000 ;;
+              AP3) /tmp/apple_cos53_cpu_pocket_attack ap3 3000 ;;
+              AP4) /tmp/apple_cos53_cpu_pocket_attack ap4 3000 ;;
+              TWG*)
+                t="${c#TWG}"; p="${t%%_*}"; t="${t#*_}"; q="${t%%_S*}"; s="${t##*_S}"
+                /tmp/apple_cos53_cpu_pocket_attack "wg${p}_${q,,}_s${s}" 3000 ;;
+              DAP*) p="${c#DAP}"; /tmp/apple_cos53_cpu_pocket_attack "p${p}" 3000 ;;
+              *) echo "unknown candidate $c" >&2; return 3 ;;
+            esac
+          }
+          run_apple() { /tmp/apple_cos53_off_frozen apple 3000; }
+
+          count=${#candidates[@]}
+          for r in 1 2 3 4; do
+            shift=$(( (r*17 + ${{ matrix.slot }}*11) % count ))
+            for ((ii=0; ii<count; ++ii)); do
+              idx=$(( (ii+shift)%count )); c="${candidates[$idx]}"
+              if (( (ii+r+${{ matrix.slot }}) % 2 == 0 )); then seq=(CAND APPLE); else seq=(APPLE CAND); fi
+              for who in "${seq[@]}"; do
+                if [[ "$who" == CAND ]]; then
+                  run_cand "$c" | sed "s/^/slot=${{ matrix.slot }} round=$r pair=$c who=CAND /" | tee -a "$OUT"
+                else
+                  run_apple | sed "s/^/slot=${{ matrix.slot }} round=$r pair=$c who=APPLE /" | tee -a "$OUT"
+                fi
+              done
+            done
+          done
+
+      - name: Static instruction audit of every kernel ablation
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out/disasm
+          declare -A bins=(
+            [OLD]=/tmp/apple_cos53_fast_optimized
+            [HOT]=/tmp/apple_cos53_fast_hotloop
+            [NOVALID]=/tmp/ab_novalid
+            [MAGICQ]=/tmp/ab_magicq
+            [MAGICJ]=/tmp/ab_magicj
+            [RESTRICT]=/tmp/ab_restrict
+            [UNROLL8]=/tmp/ab_unroll8
+            [QJ]=/tmp/ab_qj
+            [QJ_NOVALID]=/tmp/ab_qj_novalid
+            [UNROLL8_RESTRICT]=/tmp/ab_unroll8_restrict
+            [HOT_NOROOT]=/tmp/ab_hot_noroot
+            [HOT_U16]=/tmp/ab_hot_u16
+            [HOT_U32]=/tmp/ab_hot_u32
+          )
+          for k in "${!bins[@]}"; do otool -tvV "${bins[$k]}" > "/tmp/out/disasm/${k}.txt"; done
+          python3 - <<'PY' > /tmp/out/instruction-audit.txt
+          from pathlib import Path
+          import re,glob
+          def function_lines(path):
+              lines=Path(path).read_text(errors='replace').splitlines()
+              try: a=next(i for i,l in enumerate(lines) if l.startswith('__ZL14opt_cos53_evalPKdPdm:'))+1
+              except StopIteration: return []
+              out=[]
+              for l in lines[a:]:
+                  if l and not re.match(r'^[0-9a-fA-F]{16}\s',l):
+                      if l.endswith(':'): break
+                      continue
+                  m=re.match(r'^[0-9a-fA-F]{16}\s+(.+)$',l)
+                  if m: out.append(m.group(1).lower())
+              return out
+          def n(pat,ins): return sum(bool(re.search(pat,x)) for x in ins)
+          print('kernel static instruction census; counts are in emitted opt_cos53_eval body, not dynamic PMU counts')
+          print('variant total fcvtns scvtf fma fmul loads stores branches cmp lane_moves stack_mem cos_calls')
+          for path in sorted(glob.glob('/tmp/out/disasm/*.txt')):
+              name=Path(path).stem; ins=function_lines(path); txt='\n'.join(ins)
+              vals=[len(ins),n(r'\bfcvtns\b',ins),n(r'\bscvtf\b',ins),n(r'\b(?:fmla|fmls|fmadd|fmsub)\b',ins),
+                    n(r'\bfmul\b',ins),n(r'^(?:ldr|ldp|ldur|ld1)\b',ins),n(r'^(?:str|stp|stur|st1)\b',ins),
+                    n(r'^(?:b\.|b\s|bl\s|blr\s|cbz\s|cbnz\s|tbz\s|tbnz\s)',ins),n(r'\bcmp\b|\bcmn\b',ins),
+                    n(r'\b(?:fmov\s+x|mov\.d\s+x|umov\s+x)',ins),sum('[sp' in x for x in ins),sum('_cos' in x or 'symbol stub for: _cos' in x for x in ins)]
+              print(name,*vals)
           PY
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: apple-cos53-instruments-3k-78k-${{ matrix.slot }}
+          name: apple-cos53-rest-3k-waste-audit-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
