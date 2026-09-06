@@ -8,10 +8,14 @@ on:
     paths:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
+concurrency:
+  group: apple-cos53-instruments-probe
+  cancel-in-progress: true
+
 jobs:
   probe:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,29 +28,33 @@ jobs:
           git merge-base --is-ancestor "$REST" HEAD
           changed="$(git diff --name-only "$REST" HEAD | sort)"
           test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
-      - name: Probe Instruments and counters
+      - name: Probe Instruments and counters with deadlines
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           mkdir -p /tmp/out
-          {
-            echo '=== SYSTEM ==='
-            uname -a
-            sysctl -n machdep.cpu.brand_string || true
-            system_profiler SPHardwareDataType || true
-            echo '=== XCODE ==='
-            xcode-select -p || true
-            xcodebuild -version || true
-            xcrun xctrace version || true
-            echo '=== TEMPLATES ==='
-            xcrun xctrace list templates || true
-            echo '=== DEVICES ==='
-            xcrun xctrace list devices || true
-            echo '=== RECORD HELP ==='
-            xcrun xctrace record --help || true
-            echo '=== EXPORT HELP ==='
-            xcrun xctrace export --help || true
-          } 2>&1 | tee /tmp/out/probe.txt
+          python3 - <<'PY' | tee /tmp/out/probe.txt
+          import subprocess
+          cmds=[
+            ('uname',['uname','-a'],10),
+            ('cpu',['sysctl','-n','machdep.cpu.brand_string'],10),
+            ('xcode',['xcodebuild','-version'],15),
+            ('xctrace-version',['xcrun','xctrace','version'],15),
+            ('templates',['xcrun','xctrace','list','templates'],30),
+            ('record-help',['xcrun','xctrace','record','--help'],15),
+            ('export-help',['xcrun','xctrace','export','--help'],15),
+          ]
+          for name,cmd,to in cmds:
+              print(f'=== {name} ===', flush=True)
+              try:
+                  p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=to)
+                  print(p.stdout, end='')
+                  print('RC',p.returncode)
+              except subprocess.TimeoutExpired as e:
+                  out=e.stdout.decode() if isinstance(e.stdout,bytes) else (e.stdout or '')
+                  print(out,end='')
+                  print('TIMEOUT',to)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: apple-cos53-instruments-probe
