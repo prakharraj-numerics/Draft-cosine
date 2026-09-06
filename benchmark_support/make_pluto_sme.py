@@ -5,9 +5,8 @@ base=Path(sys.argv[1]).read_text()
 harness_out=Path(sys.argv[2])
 impl_out=Path(sys.argv[3])
 
-# Harness stays ordinary Apple ARM64/NEON.  Only the isolated implementation TU
-# is compiled with SME enabled, avoiding accidental non-streaming SVE codegen on
-# Apple chips where SVE exists only inside SME streaming mode.
+# Harness stays ordinary Apple ARM64/NEON. The SME implementation is isolated
+# and entered through a hand-written SMSTART/SMSTOP assembly wrapper.
 start=base.index('static inline void opt_cos53_eval(')
 end=base.index('\nclass Adaptive2', start)
 wrapper=r'''extern "C" size_t pluto_sme_eval_raw(const double*,double*,size_t,uint32_t*);
@@ -48,8 +47,8 @@ static constexpr double PI_P2 = 0x1.a308d313198a3p-40;
 static constexpr double MH = -0x1.ffffff92c5f94p-2;
 static constexpr double M6 = -0x1.5555551eb851fp-3;
 
-static size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,size_t n,uint32_t* bad_idx) __arm_streaming;
-static size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,size_t n,uint32_t* bad_idx) __arm_streaming
+extern "C" size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,size_t n,uint32_t* bad_idx) __arm_streaming;
+extern "C" size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,size_t n,uint32_t* bad_idx) __arm_streaming
 {
     // Exact frozen PLUTO no-P3 mathematics, widened to streaming SVE/SME.
     const svfloat64_t magic = svdup_n_f64(0x1p52);
@@ -92,9 +91,9 @@ static size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,s
         delta = svmla_n_f64_x(pg,delta,jd,NINVK_LO);
         delta = svadd_f64_x(pg,delta,al);
 
-        // AppleClang currently disallows arbitrary SVE gather intrinsics in a
-        // streaming function.  Keep the exact AoS LUT and scalarize only these
-        // coefficient addresses; all arithmetic is still full-width SSVE.
+        // AppleClang does not expose the needed arbitrary gather in streaming
+        // mode here, so only coefficient address resolution is scalarized.
+        // The PLUTO reduction and polynomial arithmetic remain full-width SSVE.
         svst1_u64(pg,jt,ji);
         for(size_t k=0;k<lanes;k++) {
             c0t[k]=opt_cos53_coeff_aos[2*jt[k]];
@@ -118,13 +117,6 @@ static size_t pluto_sme_stream(const double* __restrict x,double* __restrict y,s
             if(__builtin_expect(jt[k]>=2009,0)) bad_idx[bad_n++]=(uint32_t)(i+k);
     }
     return bad_n;
-}
-
-// Non-streaming ABI entry.  Compiler emits the SMSTART/SMSTOP transition here,
-// keeping every caller and the benchmark harness in ordinary ARM64 mode.
-extern "C" size_t pluto_sme_eval_raw(const double* x,double* y,size_t n,uint32_t* bad_idx)
-{
-    return pluto_sme_stream(x,y,n,bad_idx);
 }
 '''
 impl_out.write_text(impl)
