@@ -94,7 +94,7 @@ jobs:
           rows=[]
           for line in open(pmf,errors='replace'):
               t=line.split()
-              if len(t) >= 9 and t[1] == pid:
+              if len(t) >= 8 and t[1] == pid:
                   try:
                       cpu_ms_s=float(t[2]); intr_s=float(t[6]); pkg_s=float(t[7])
                   except ValueError:
