@@ -43,16 +43,12 @@ jobs:
           from pathlib import Path
           hits=0
           for p in Path('benchmark_support').glob('*.sh'):
-              s=p.read_text()
-              n=s.count('2000000/n')
+              s=p.read_text(); n=s.count('2000000/n')
               if n:
-                  p.write_text(s.replace('2000000/n','300000000/n'))
-                  hits += n
+                  p.write_text(s.replace('2000000/n','300000000/n')); hits += n
           p=Path('benchmark_support/apple_cos53_highway_benchmark.cpp')
-          s=p.read_text()
-          a=s.count('12000000/(n*6)')
-          if a:
-              p.write_text(s.replace('12000000/(n*6)','300000000/(n*6)'))
+          s=p.read_text(); a=s.count('12000000/(n*6)')
+          if a: p.write_text(s.replace('12000000/(n*6)','300000000/(n*6)'))
           print('rest_rep_patch_hits',hits,'apple_rep_patch_hits',a)
           assert hits >= 1 and a >= 1
           PY
@@ -78,48 +74,44 @@ jobs:
             done
           done
 
-      - name: Time Profiler REST and Apple at 3K and 78K
+      - name: Time Profiler steady windows
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY' | tee /tmp/out/xctrace-status.txt
-          import subprocess,os
+          import subprocess,os,signal,time
           slot=${{ matrix.slot }}
           cases=[('REST',3000),('APPLE',3000),('REST',78000),('APPLE',78000)]
-          if slot % 2 == 0:
-              cases=list(reversed(cases))
+          if slot % 2 == 0: cases=list(reversed(cases))
           for who,n in cases:
               tag=f'{who.lower()}_{n}'
               trace=f'/tmp/out/{tag}.trace'
               stdout=f'/tmp/out/{tag}.run.txt'
-              if who=='REST':
-                  target=['/bin/bash','benchmark_support/run_apple_cos53_WORK_smooth_switch.sh','one',str(n)]
-              else:
-                  target=['/tmp/apple_cos53_off_frozen','apple',str(n)]
-              cmd=['xcrun','xctrace','record','--template','Time Profiler','--output',trace,'--target-stdout',stdout,'--no-prompt','--launch','--']+target
+              target=(['/bin/bash','benchmark_support/run_apple_cos53_WORK_smooth_switch.sh','one',str(n)]
+                      if who=='REST' else ['/tmp/apple_cos53_off_frozen','apple',str(n)])
+              cmd=['xcrun','xctrace','record','--template','Time Profiler','--time-limit','2s',
+                   '--output',trace,'--target-stdout',stdout,'--no-prompt','--launch','--']+target
               print('RECORD',who,n,' '.join(target),flush=True)
-              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=45)
-              print(p.stdout,end='')
-              print('RC',p.returncode,'trace',os.path.isdir(trace),flush=True)
-              if p.returncode != 0 or not os.path.isdir(trace):
-                  raise SystemExit(f'xctrace failed {who} {n}')
-              exports=[
+              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=20)
+              print(p.stdout,end=''); print('RC',p.returncode,'trace',os.path.isdir(trace),flush=True)
+              if not os.path.isdir(trace): raise SystemExit(f'no trace {who} {n}')
+              for kind,args in [
                   ('toc',['--toc']),
                   ('time-profile',['--xpath','/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]']),
-                  ('time-sample',['--xpath','/trace-toc/run[@number="1"]/data/table[@schema="time-sample"]']),
-              ]
-              for kind,args in exports:
+                  ('time-sample',['--xpath','/trace-toc/run[@number="1"]/data/table[@schema="time-sample"]'])]:
                   out=f'/tmp/out/{tag}-{kind}.xml'
-                  ecmd=['xcrun','xctrace','export','--input',trace]+args+['--output',out]
-                  ep=subprocess.run(ecmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=30)
+                  ep=subprocess.run(['xcrun','xctrace','export','--input',trace]+args+['--output',out],
+                                    stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=30)
                   print('EXPORT',tag,kind,'rc',ep.returncode,'bytes',os.path.getsize(out) if os.path.exists(out) else -1)
                   if ep.stdout: print(ep.stdout,end='')
           PY
 
       - name: Capture ARM64 disassembly and symbols
+        if: always()
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
+          mkdir -p /tmp/out
           {
             echo '=== 3K REST binary: canonical optimized ==='
             nm -nm /tmp/apple_cos53_canonical_optimized_bench || true
@@ -128,28 +120,21 @@ jobs:
             echo '=== Apple vvcos comparison binary ==='
             nm -nm /tmp/apple_cos53_off_frozen || true
           } > /tmp/out/symbols.txt 2>&1
-          otool -tvV /tmp/apple_cos53_canonical_optimized_bench > /tmp/out/rest3k-disasm.txt
-          otool -tvV /tmp/apple_cos53_hotloop_apple_specific_bench > /tmp/out/rest78k-disasm.txt
-          otool -tvV /tmp/apple_cos53_off_frozen > /tmp/out/apple-disasm.txt
+          otool -tvV /tmp/apple_cos53_canonical_optimized_bench > /tmp/out/rest3k-disasm.txt 2>&1 || true
+          otool -tvV /tmp/apple_cos53_hotloop_apple_specific_bench > /tmp/out/rest78k-disasm.txt 2>&1 || true
+          otool -tvV /tmp/apple_cos53_off_frozen > /tmp/out/apple-disasm.txt 2>&1 || true
           python3 - <<'PY' > /tmp/out/instruction-summary.txt
-          import re
+          import re,os
           files={'REST_3K':'/tmp/out/rest3k-disasm.txt','REST_78K':'/tmp/out/rest78k-disasm.txt','APPLE_WRAPPER':'/tmp/out/apple-disasm.txt'}
-          pats={
-            'fmla/fmadd':r'\b(?:fmla|fmadd)\b',
-            'fmul':r'\bfmul\b',
-            'fadd/fsub':r'\bf(?:add|sub)\b',
-            'loads':r'\b(?:ldr|ldp|ld1|ldur)\b',
-            'stores':r'\b(?:str|stp|st1|stur)\b',
-            'fp-int-conv':r'\b(?:fcvt|scvtf|ucvtf|fcvtns|fcvtzs|fcvtzu)\w*\b',
-            'branches':r'\b(?:b\.|b\s|bl\s|blr\s|cbz\s|cbnz\s|tbz\s|tbnz\s)'
-          }
+          pats={'fmla/fmadd':r'\b(?:fmla|fmadd)\b','fmul':r'\bfmul\b','fadd/fsub':r'\bf(?:add|sub)\b','loads':r'\b(?:ldr|ldp|ld1|ldur)\b','stores':r'\b(?:str|stp|st1|stur)\b','fp-int-conv':r'\b(?:fcvt|scvtf|ucvtf|fcvtns|fcvtzs|fcvtzu)\w*\b','branches':r'\b(?:b\.|b\s|bl\s|blr\s|cbz\s|cbnz\s|tbz\s|tbnz\s)'}
           for name,path in files.items():
-              txt=open(path,errors='replace').read().lower()
+              txt=open(path,errors='replace').read().lower() if os.path.exists(path) else ''
               print(name)
               for k,p in pats.items(): print(k,len(re.findall(p,txt)))
           PY
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: apple-cos53-instruments-3k-78k-${{ matrix.slot }}
           path: /tmp/out
