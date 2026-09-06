@@ -1,0 +1,109 @@
+name: Apple COS53 PATCH CPU-fix final verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-PATCH-cpu-fix-20260906
+    paths:
+      - 'benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh'
+      - '.github/workflows/apple-cos53-PATCH-cpu-fix-final.yml'
+
+concurrency:
+  group: apple-cos53-patch-cpu-fix-final
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen PATCH untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH=5f13c87218873fd9353ef5ab549b8170d8bf3e2a
+          git merge-base --is-ancestor "$PATCH" HEAD
+          git diff --name-only "$PATCH"...HEAD | sort > /tmp/changed.txt
+          printf '%s\n' \
+            '.github/workflows/apple-cos53-PATCH-cpu-fix-sweep.yml' \
+            '.github/workflows/apple-cos53-PATCH-cpu-fix-refine.yml' \
+            '.github/workflows/apple-cos53-PATCH-cpu-fix-final.yml' \
+            'benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh' | sort > /tmp/allowed.txt
+          diff -u /tmp/allowed.txt /tmp/changed.txt
+
+      - name: Build CPU-fix copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh build
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Assert selected routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 1200)" == wg2_ui ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 30000)" == wg2_default ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 79000)" == wg3_ui_s8 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 100000)" == wg3_utility_s0 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 200000)" == wg3_user_s0 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 500000)" == wg3_default_s0 ]]
+          for n in 100 400 700 3000 15000 29999 40000 40001 75000 78000 80000 81000 82000 1000000; do
+            [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route "$n")" == PATCH ]]
+          done
+
+      - name: Validate math
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Benchmark PATCH vs CPUFIX vs Apple M1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+
+          run_patch() { bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh one "$1"; }
+          run_fix()   { bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh one "$1"; }
+          run_apple() { /tmp/apple_cos53_off_frozen apple "$1"; }
+
+          for r in 1 2 3; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }} + n) % 3 ))
+              if (( order == 0 )); then seq=(PATCH CPUFIX APPLE)
+              elif (( order == 1 )); then seq=(CPUFIX APPLE PATCH)
+              else seq=(APPLE PATCH CPUFIX)
+              fi
+              for who in "${seq[@]}"; do
+                case "$who" in
+                  PATCH)  run_patch "$n" ;;
+                  CPUFIX) run_fix "$n" ;;
+                  APPLE)  run_apple "$n" ;;
+                esac \
+                  | sed -E "s/stack=[^ ]+/stack=$who/" \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-patch-cpu-fix-final-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
