@@ -1,15 +1,15 @@
-name: Apple COS53 WORK smooth-switch full ladder
+name: Apple COS53 REST 79-81K hypothesis vs Apple M1
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - exp/apple-cos53-WORK-smooth-switching-20260906
+      - exp/apple-cos53-REST-79-81k-hypothesis-20260906
     paths:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-work-smooth-switch-full
+  group: apple-cos53-rest-79-81k-hypothesis
   cancel-in-progress: true
 
 jobs:
@@ -24,25 +24,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Build exact WORK and threshold-only attack
+
+      - name: Prove exact frozen REST plus workflow only
         shell: bash
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor 2daf7bd0a5a08df06efd169b1c38b55569de32f7 HEAD
+          REST=925ae7aad2a8878e325f521b1dcc69d5eb443e99
+          git merge-base --is-ancestor "$REST" HEAD
+          changed="$(git diff --name-only "$REST" HEAD | sort)"
+          test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
+          test "$(git hash-object benchmark_support/run_apple_cos53_WORK_smooth_switch.sh)" = f33a3187b191c076397f433c56111b2f041dfa4a
           bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh build
-      - name: Assert attack changes switching only
+
+      - name: Assert REST routes at 79K 80K 81K
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 3000)" == WORK ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 29999)" == pool2 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 30000)" == wg2_ui ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 40000)" == WORK_40K_wg3_user ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 40001)" == wg2_ui ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 78000)" == WORK ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 200000)" == WORK ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 500000)" == WORK ]]
-      - name: Validate unchanged kernels
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 79000)" == WORK ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 80000)" == WORK ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 81000)" == WORK ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 79000)" == frozen_baseline ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 80000)" == wg2_utility_s8 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 81000)" == frozen_baseline ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 79000)" == contract_fast_p64 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 81000)" == contract_fast_p64 ]]
+
+      - name: Validate unchanged REST kernels
         if: matrix.slot == 1
         shell: bash
         run: |
@@ -52,29 +59,32 @@ jobs:
           bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy_fast.txt
           bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate off
           bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy_off.txt
-      - name: Benchmark attack vs WORK vs Apple M1
+
+      - name: Benchmark REST vs Apple M1 at 79K 80K 81K
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out
           OUT=/tmp/out/results.txt
           : > "$OUT"
-          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 78000 80000 82000 100000 200000 500000 1000000)
-          for r in 1 2 3; do
+          sizes=(79000 80000 81000)
+          for r in 1 2 3 4 5; do
             for n in "${sizes[@]}"; do
-              order=$(( (r + ${{ matrix.slot }} + n) % 3 ))
-              if (( order == 0 )); then seq=(ATTACK WORK APPLE); elif (( order == 1 )); then seq=(WORK APPLE ATTACK); else seq=(APPLE ATTACK WORK); fi
+              order=$(( (r + ${{ matrix.slot }} + n) % 2 ))
+              if (( order == 0 )); then seq=(REST APPLE); else seq=(APPLE REST); fi
               for who in "${seq[@]}"; do
                 case "$who" in
-                  ATTACK) bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh one "$n" | sed -E 's/stack=[^ ]+/stack=ATTACK/' ;;
-                  WORK) bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh one "$n" | sed -E 's/stack=[^ ]+/stack=WORK/' ;;
-                  APPLE) /tmp/apple_cos53_off_frozen apple "$n" | sed -E 's/stack=[^ ]+/stack=APPLE/' ;;
+                  REST)
+                    bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh one "$n" | sed -E 's/stack=[^ ]+/stack=REST/' ;;
+                  APPLE)
+                    /tmp/apple_cos53_off_frozen apple "$n" | sed -E 's/stack=[^ ]+/stack=APPLE/' ;;
                 esac | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" | tee -a "$OUT"
               done
             done
           done
+
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-work-smooth-full-${{ matrix.slot }}
+          name: apple-cos53-rest-79-81k-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
