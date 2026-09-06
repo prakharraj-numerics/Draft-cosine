@@ -1,4 +1,4 @@
-name: Apple COS53 REST process-energy telemetry probe
+name: Apple COS53 REST energy-related counter probe
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-rest-process-energy-probe
+  group: apple-cos53-rest-energy-counter-probe
   cancel-in-progress: true
 
 jobs:
@@ -28,7 +28,7 @@ jobs:
           git merge-base --is-ancestor "$REST" HEAD
           changed="$(git diff --name-only "$REST" HEAD | sort)"
           test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
-      - name: Probe per-process energy impact
+      - name: Probe energy-related counters
         shell: bash
         run: |
           set -euo pipefail
@@ -36,7 +36,7 @@ jobs:
           cat >/tmp/energyburn.py <<'PY'
           import math,time
           x=0.123
-          end=time.time()+4
+          end=time.time()+5
           while time.time()<end:
               for i in range(200000): x=math.cos(x+i*1e-9)
           print(x)
@@ -44,12 +44,16 @@ jobs:
           python3 /tmp/energyburn.py >/tmp/out/burn.out 2>&1 &
           BURN=$!
           sleep 0.3
-          sudo -n /usr/bin/powermetrics --samplers tasks --show-process-energy -r pid -i 200 -n 8 2>&1 | tee /tmp/out/process_energy.txt
+          set +e
+          sudo -n /usr/bin/powermetrics --samplers tasks --show-process-energy --show-process-samp-norm --show-process-amp --show-process-ipc -r pid -i 250 -n 8 2>&1 | tee /tmp/out/counters.txt
+          RC=${PIPESTATUS[0]}
+          set -e
+          echo "powermetrics_rc=$RC" | tee -a /tmp/out/counters.txt
           wait $BURN
-          echo '=== energy lines ==='
-          grep -Ei 'energy|python|PID|energyburn' /tmp/out/process_energy.txt | tail -200 || true
+          echo '=== relevant lines ===' | tee -a /tmp/out/counters.txt
+          grep -Ei 'Name|Python|Energy Impact|Instructions|Cycles|cluster|AMP|Wakeups|Pkg idle|CPU ms/s' /tmp/out/counters.txt | tail -300 | tee /tmp/out/relevant.txt || true
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-rest-process-energy-probe
+          name: apple-cos53-rest-energy-counter-probe
           path: /tmp/out
           if-no-files-found: error
