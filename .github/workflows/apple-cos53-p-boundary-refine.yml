@@ -1,0 +1,77 @@
+name: Apple COS53 p-boundary refine
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-p-sweep-40-100k-20260906
+    paths:
+      - '.github/workflows/apple-cos53-p-boundary-refine.yml'
+
+concurrency:
+  group: apple-cos53-p-boundary-refine
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact current baseline and p challengers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+          cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_canonical_frozen_bench
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+          cp /tmp/apple_cos53_cpu_eff_bench /tmp/apple_cos53_canonical_optimized_bench
+          bash benchmark_support/run_apple_cos53_apple_specific_eff.sh build
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh build
+          bash benchmark_support/run_apple_cos53_p_sweep_40_100k.sh build
+
+      - name: Refine lower and upper boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} baseline_sha=70eea3cc4395d2643e9e4fea3824fee18d755c4f" > "$OUT"
+          sizes=(57500 60000 62500 65000 67500 70000 90000 92500 95000 97500 100000)
+          pieces=(40 64)
+          for r in 0 1 2 3 4; do
+            for n in "${sizes[@]}"; do
+              if (( (r + ${{ matrix.slot }}) % 2 == 0 )); then
+                /tmp/apple_cos53_canonical_optimized_bench auto "$n" | sed -E 's/stack=[^ ]+/stack=baseline/' | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+              fi
+              for p in "${pieces[@]}"; do
+                bash benchmark_support/run_apple_cos53_p_sweep_40_100k.sh p "$p" "$n" | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+              done
+              if (( (r + ${{ matrix.slot }}) % 2 == 1 )); then
+                /tmp/apple_cos53_canonical_optimized_bench auto "$n" | sed -E 's/stack=[^ ]+/stack=baseline/' | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+              fi
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-p-boundary-refine-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
