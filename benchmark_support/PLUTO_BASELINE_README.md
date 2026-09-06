@@ -1,0 +1,1 @@
+PLUTO is the frozen single-thread COS53 kernel baseline. Use benchmark_support/run_apple_cos53_PLUTO.sh for build, validation, PLUTO single-thread runs, DESTINY single-thread control, and Apple vvcos single-thread control.
