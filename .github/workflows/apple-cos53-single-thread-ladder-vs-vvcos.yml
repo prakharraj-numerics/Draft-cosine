@@ -1,0 +1,85 @@
+name: Apple COS53 single-thread full ladder vs vvcos
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-single-thread-ladder-20260906
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen DESTINY ref unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESTINY=f3288a1faf54d7b352bd564ae8760ddb35ce1892
+          git fetch origin freeze/apple-cos53-DESTINY-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$DESTINY"
+          git merge-base --is-ancestor "$DESTINY" HEAD
+
+      - name: Build exact DESTINY stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh build
+          test -x /tmp/apple_cos53_hotloop_bench
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Validate unchanged math
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh validate
+
+      - name: Benchmark single thread vs single thread
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+
+          run_destiny_single() { /tmp/apple_cos53_hotloop_bench single "$1"; }
+          run_apple_single() { env VECLIB_MAXIMUM_THREADS=1 /tmp/apple_cos53_off_frozen apple "$1"; }
+
+          for r in 1 2 3 4 5; do
+            for n in "${sizes[@]}"; do
+              if (( (r + n) % 2 )); then seq=(DESTINY_SINGLE APPLE_SINGLE); else seq=(APPLE_SINGLE DESTINY_SINGLE); fi
+              for who in "${seq[@]}"; do
+                case "$who" in
+                  DESTINY_SINGLE) run_destiny_single "$n" ;;
+                  APPLE_SINGLE) run_apple_single "$n" ;;
+                esac \
+                  | sed -E "s/stack=[^ ]+/stack=$who/" \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+
+          awk '
+            /stack=APPLE_SINGLE/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2] > 1.10){bad=1; print "APPLE_SINGLE effective_cores violation:",$0 > "/dev/stderr"}}
+            }
+            END{exit bad}
+          ' "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-single-thread-ladder-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
