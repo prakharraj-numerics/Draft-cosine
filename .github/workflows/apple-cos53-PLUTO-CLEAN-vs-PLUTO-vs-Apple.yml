@@ -1,0 +1,113 @@
+name: Apple COS53 PLUTO-CLEAN vs PLUTO vs Apple
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-PLUTO-CLEAN-20260906
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen PLUTO untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUTO=d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+          git fetch origin freeze/apple-cos53-PLUTO-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$PLUTO"
+          git merge-base --is-ancestor "$PLUTO" HEAD
+
+      - name: Build burden-free successor
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO_CLEAN.sh build
+          test -x /tmp/apple_cos53_pluto_clean_bench
+          test -x /tmp/kernel_attack_no_p3
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Structural audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          {
+            echo "slot=${{ matrix.slot }}"
+            echo "clean_bytes=$(stat -f %z /tmp/apple_cos53_pluto_clean_bench)"
+            echo "pluto_bytes=$(stat -f %z /tmp/kernel_attack_no_p3)"
+            echo "clean_undefined_symbols:"
+            nm -u /tmp/apple_cos53_pluto_clean_bench || true
+          } > /tmp/out/structure_${{ matrix.slot }}.txt
+          ! grep -E 'pthreadpool|pthread_set_qos|os_workgroup|vvcos' /tmp/out/structure_${{ matrix.slot }}.txt
+
+      - name: Accuracy gate PLUTO-CLEAN
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          txt=$(bash benchmark_support/run_apple_cos53_PLUTO_CLEAN.sh validate)
+          printf '%s\n' "$txt" | tee /tmp/out/accuracy.txt
+          printf '%s\n' "$txt" | awk '
+            /APPLE_COS53_CPU_EFF_ACCURACY/ {
+              found=1; max=-1;
+              for(i=1;i<=NF;i++) if($i ~ /^maxulp=/){split($i,a,"="); max=a[2]+0}
+              if(max<0 || max>2){bad=1; print "accuracy failure:",$0 > "/dev/stderr"}
+            }
+            END{if(!found || bad) exit 1}
+          '
+
+      - name: Full paired single-thread ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results_${{ matrix.slot }}.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          for r in 1 2 3 4 5; do
+            idx=0
+            for n in "${sizes[@]}"; do
+              idx=$((idx+1))
+              m=$(((r+idx)%3))
+              if ((m==0)); then seq=(CLEAN PLUTO APPLE); elif ((m==1)); then seq=(PLUTO APPLE CLEAN); else seq=(APPLE CLEAN PLUTO); fi
+              for role in "${seq[@]}"; do
+                case "$role" in
+                  CLEAN) bash benchmark_support/run_apple_cos53_PLUTO_CLEAN.sh one "$n" ;;
+                  PLUTO) bash benchmark_support/run_apple_cos53_PLUTO_CLEAN.sh pluto "$n" ;;
+                  APPLE) bash benchmark_support/run_apple_cos53_PLUTO_CLEAN.sh apple "$n" ;;
+                esac \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n role=$role /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+          awk '
+            /role=APPLE/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2]>1.10){bad=1; print "Apple thread limit failure:",$0 > "/dev/stderr"}}
+            }
+            /role=CLEAN/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2]>1.10){bad=1; print "CLEAN not single-core:",$0 > "/dev/stderr"}}
+            }
+            /role=PLUTO/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2]>1.10){bad=1; print "PLUTO not single-core:",$0 > "/dev/stderr"}}
+            }
+            END{exit bad}
+          ' "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-clean-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
