@@ -1,0 +1,275 @@
+name: Apple COS53 KERNEL ATTACK single-thread shootout
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-KERNEL-ATTACK-20260906
+
+permissions:
+  contents: read
+
+jobs:
+  shootout:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen DESTINY untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESTINY=f3288a1faf54d7b352bd564ae8760ddb35ce1892
+          git fetch origin freeze/apple-cos53-DESTINY-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$DESTINY"
+          git merge-base --is-ancestor "$DESTINY" HEAD
+
+      - name: Build all kernel attacks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh build
+
+      - name: Accuracy gate every variant
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          ACC=/tmp/out/accuracy_1.txt
+          : > "$ACC"
+          while read -r v; do
+            set +e
+            txt=$(bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh validate "$v" 2>&1)
+            rc=$?
+            set -e
+            printf 'variant=%s validate_rc=%s\n' "$v" "$rc" | tee -a "$ACC"
+            printf '%s\n' "$txt" | sed "s/^/variant=$v /" | tee -a "$ACC"
+          done < <(bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh variants)
+          cp /tmp/kernel_attack_destiny.s /tmp/out/
+          cp /tmp/kernel_attack_lean_safe.s /tmp/out/
+
+      - name: 1M paired single-thread shootout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results_${{ matrix.slot }}.txt
+          : > "$OUT"
+          mapfile -t vars < <(bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh variants)
+          idx=0
+          for v in "${vars[@]}"; do
+            idx=$((idx+1))
+            for r in 1 2 3 4 5; do
+              m=$(((r+idx)%3))
+              if ((m==0)); then seq=(CAND BASE APPLE); elif ((m==1)); then seq=(BASE APPLE CAND); else seq=(APPLE CAND BASE); fi
+              for role in "${seq[@]}"; do
+                case "$role" in
+                  CAND) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh one "$v" 1000000 ;;
+                  BASE) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh destiny 1000000 ;;
+                  APPLE) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh apple 1000000 ;;
+                esac \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r variant=$v role=$role /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+          awk '
+            /role=APPLE/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2] > 1.10){bad=1; print "Apple thread-limit violation:",$0 > "/dev/stderr"}}
+            }
+            END{exit bad}
+          ' "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-attack-shootout-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
+
+  select:
+    needs: shootout
+    runs-on: ubuntu-latest
+    outputs:
+      winner: ${{ steps.pick.outputs.winner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kernel-attack-shootout-*
+          path: /tmp/in
+          merge-multiple: true
+
+      - id: pick
+        name: Select best accuracy-safe dual win
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import math, statistics, re, os
+          root=Path('/tmp/in')
+          rows=[]
+          for p in sorted(root.glob('results_*.txt')):
+              for line in p.read_text().splitlines():
+                  d={}
+                  for tok in line.split():
+                      if '=' in tok:
+                          k,v=tok.split('=',1); d[k]=v
+                  if all(k in d for k in ('slot','round','variant','role','wall_ns_el','cpu_ns_el')):
+                      rows.append(d)
+          acc={}
+          ap=root/'accuracy_1.txt'
+          if not ap.exists(): raise SystemExit('missing accuracy file')
+          rc={}
+          for line in ap.read_text().splitlines():
+              m=re.search(r'variant=(\S+) validate_rc=(\d+)',line)
+              if m: rc[m.group(1)]=int(m.group(2)); acc.setdefault(m.group(1),[])
+              m=re.search(r'variant=(\S+).*?maxulp=(\d+)',line)
+              if m: acc.setdefault(m.group(1),[]).append(int(m.group(2)))
+          variants=sorted({r['variant'] for r in rows})
+          report=[]
+          good=[]
+          for v in variants:
+              by={}
+              for r in rows:
+                  if r['variant']!=v: continue
+                  key=(r['slot'],r['round']); by.setdefault(key,{})[r['role']]=r
+              wr=[]; cr=[]; aw=[]; ac=[]
+              for q in by.values():
+                  if not {'CAND','BASE','APPLE'} <= q.keys(): continue
+                  c,b,a=q['CAND'],q['BASE'],q['APPLE']
+                  wr.append(float(c['wall_ns_el'])/float(b['wall_ns_el']))
+                  cr.append(float(c['cpu_ns_el'])/float(b['cpu_ns_el']))
+                  aw.append(float(a['wall_ns_el'])/float(c['wall_ns_el']))
+                  ac.append(float(c['cpu_ns_el'])/float(a['cpu_ns_el']))
+              mw=statistics.median(wr); mc=statistics.median(cr)
+              ma=statistics.median(aw); mca=statistics.median(ac)
+              maxulp=max(acc.get(v,[999999])); passed=(rc.get(v,1)==0 and bool(acc.get(v)) and maxulp<=2)
+              dual=passed and mw<1 and mc<1
+              score=math.sqrt(mw*mc)
+              report.append((v,passed,maxulp,mw,mc,ma,mca,dual,score,len(wr)))
+              if dual: good.append((score,mw+mc,v))
+          if good:
+              winner=min(good)[2]
+          else:
+              safe=[(x[8],x[3]+x[4],x[0]) for x in report if x[1]]
+              if not safe: raise SystemExit('no accuracy-safe candidate')
+              winner=min(safe)[2]
+          lines=['variant pass maxULP cand/base_wall cand/base_cpu apple/cand_wall cand/apple_cpu dual pairs']
+          for x in sorted(report,key=lambda z:z[8]):
+              lines.append(f'{x[0]} {int(x[1])} {x[2]} {x[3]:.6f} {x[4]:.6f} {x[5]:.6f} {x[6]:.6f} {int(x[7])} {x[9]}')
+          lines.append('WINNER '+winner)
+          Path('/tmp/selection.txt').write_text('\n'.join(lines)+'\n')
+          print('\n'.join(lines))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('winner='+winner+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-attack-selection
+          path: /tmp/selection.txt
+
+  ladder:
+    needs: select
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove frozen DESTINY untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin freeze/apple-cos53-DESTINY-20260906
+          test "$(git rev-parse FETCH_HEAD)" = f3288a1faf54d7b352bd564ae8760ddb35ce1892
+      - name: Build winner family
+        shell: bash
+        run: bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh build
+      - name: Revalidate selected winner
+        if: matrix.slot == 1
+        shell: bash
+        run: bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh validate '${{ needs.select.outputs.winner }}'
+      - name: Full 20-batch paired single-thread ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/ladder_${{ matrix.slot }}.txt
+          : > "$OUT"
+          winner='${{ needs.select.outputs.winner }}'
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          for r in 1 2 3 4 5; do
+            for n in "${sizes[@]}"; do
+              m=$(((r+n)%3))
+              if ((m==0)); then seq=(CAND BASE APPLE); elif ((m==1)); then seq=(BASE APPLE CAND); else seq=(APPLE CAND BASE); fi
+              for role in "${seq[@]}"; do
+                case "$role" in
+                  CAND) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh one "$winner" "$n" ;;
+                  BASE) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh destiny "$n" ;;
+                  APPLE) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh apple "$n" ;;
+                esac \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n variant=$winner role=$role /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+          awk '/role=APPLE/ {for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2]>1.10) bad=1}} END{exit bad}' "$OUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-attack-ladder-${{ matrix.slot }}
+          path: /tmp/out
+
+  summarize:
+    needs: [select, ladder]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kernel-attack-ladder-*
+          path: /tmp/in
+          merge-multiple: true
+      - name: Aggregate paired medians
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import statistics
+          rows=[]
+          for p in Path('/tmp/in').glob('ladder_*.txt'):
+              for line in p.read_text().splitlines():
+                  d={}
+                  for tok in line.split():
+                      if '=' in tok:
+                          k,v=tok.split('=',1); d[k]=v
+                  if all(k in d for k in ('slot','round','n','role','wall_ns_el','cpu_ns_el','variant')): rows.append(d)
+          sizes=sorted({int(r['n']) for r in rows})
+          winner=rows[0]['variant'] if rows else 'NONE'
+          out=[f'WINNER {winner}','n cand/base_wall cand/base_cpu apple/cand_wall cand/apple_cpu cand_vs_base_wall_win_pairs cand_vs_base_cpu_win_pairs pairs']
+          for n in sizes:
+              by={}
+              for r in rows:
+                  if int(r['n'])!=n: continue
+                  by.setdefault((r['slot'],r['round']),{})[r['role']]=r
+              wb=[]; cb=[]; aw=[]; ca=[]; ww=0; cw=0
+              for q in by.values():
+                  if not {'CAND','BASE','APPLE'} <= q.keys(): continue
+                  c,b,a=q['CAND'],q['BASE'],q['APPLE']
+                  x=float(c['wall_ns_el'])/float(b['wall_ns_el']); y=float(c['cpu_ns_el'])/float(b['cpu_ns_el'])
+                  wb.append(x); cb.append(y); aw.append(float(a['wall_ns_el'])/float(c['wall_ns_el'])); ca.append(float(c['cpu_ns_el'])/float(a['cpu_ns_el']))
+                  ww += x<1; cw += y<1
+              out.append(f'{n} {statistics.median(wb):.6f} {statistics.median(cb):.6f} {statistics.median(aw):.6f} {statistics.median(ca):.6f} {ww} {cw} {len(wb)}')
+          Path('/tmp/final_summary.txt').write_text('\n'.join(out)+'\n')
+          print('\n'.join(out))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-attack-final-summary
+          path: /tmp/final_summary.txt
