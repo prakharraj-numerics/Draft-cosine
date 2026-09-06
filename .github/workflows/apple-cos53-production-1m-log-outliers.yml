@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 78000)" == old_wg3_utility ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 80000)" == wg2_utility_s8 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 82000)" == old_wg2_default ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 82000)" == frozen_baseline ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 100000)" == native_pool3_off ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 200000)" == old_wg3_utility ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 500000)" == frozen_baseline ]]
@@ -81,6 +81,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-cpu-pockets-final-${{ matrix.slot }}
+          name: apple-cos53-cpu-pockets-final2-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
