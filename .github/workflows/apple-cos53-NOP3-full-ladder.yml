@@ -1,0 +1,88 @@
+name: Apple COS53 NOP3 full single-thread ladder
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-NOP3-full-ladder-20260906
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen DESTINY untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESTINY=f3288a1faf54d7b352bd564ae8760ddb35ce1892
+          git fetch origin freeze/apple-cos53-DESTINY-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$DESTINY"
+          git merge-base --is-ancestor "$DESTINY" HEAD
+
+      - name: Build NOP3 candidate and baselines
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh build
+          test -x /tmp/kernel_attack_no_p3
+          test -x /tmp/apple_cos53_hotloop_bench
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Accuracy gate NOP3
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh validate no_p3 | tee /tmp/out/accuracy.txt
+
+      - name: Full paired single-thread ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results_${{ matrix.slot }}.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          idx=0
+          for n in "${sizes[@]}"; do
+            idx=$((idx+1))
+            for r in 1 2 3 4 5; do
+              m=$(((r+idx)%3))
+              if ((m==0)); then seq=(CAND BASE APPLE); elif ((m==1)); then seq=(BASE APPLE CAND); else seq=(APPLE CAND BASE); fi
+              for role in "${seq[@]}"; do
+                case "$role" in
+                  CAND) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh one no_p3 "$n" ;;
+                  BASE) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh destiny "$n" ;;
+                  APPLE) bash benchmark_support/run_apple_cos53_KERNEL_ATTACK.sh apple "$n" ;;
+                esac \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n role=$role /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+          awk '
+            /role=APPLE/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2] > 1.10){bad=1; print "Apple thread-limit violation:",$0 > "/dev/stderr"}}
+            }
+            /role=CAND|role=BASE/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2] > 1.10){bad=1; print "Our single-thread violation:",$0 > "/dev/stderr"}}
+            }
+            END{exit bad}
+          ' "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nop3-full-ladder-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
