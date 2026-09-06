@@ -52,12 +52,8 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 1200)" == wg2_ui ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 30000)" == wg2_default ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 79000)" == wg3_ui_s8 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 100000)" == wg3_utility_s0 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 200000)" == wg3_user_s0 ]]
           [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route 500000)" == wg3_default_s0 ]]
-          for n in 100 400 700 3000 15000 29999 40000 40001 75000 78000 80000 81000 82000 1000000; do
+          for n in 100 400 700 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 1000000; do
             [[ "$(bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh route "$n")" == PATCH ]]
           done
 
