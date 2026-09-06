@@ -5,6 +5,10 @@ on:
     branches:
       - exp/apple-cos53-single-thread-ladder-20260906
 
+concurrency:
+  group: apple-cos53-single-thread-full-ladder
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
