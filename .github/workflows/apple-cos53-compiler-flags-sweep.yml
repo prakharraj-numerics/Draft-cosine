@@ -1,0 +1,149 @@
+name: Apple COS53 compiler flags sweep
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-compiler-attack-20260906
+    paths:
+      - '.github/workflows/apple-cos53-compiler-flags-sweep.yml'
+
+concurrency:
+  group: apple-cos53-compiler-flags-sweep
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build baseline and compiler challengers
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD^)" == "9ef125b86cbc996686daab5d3c7ebaa1b629e80d" ]]
+          mkdir -p /tmp/orig /tmp/stacks /tmp/out
+          files=(
+            benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh
+            benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh
+            benchmark_support/run_apple_cos53_apple_specific_eff.sh
+            benchmark_support/run_apple_cos53_hotloop_eff.sh
+            benchmark_support/run_apple_cos53_current_p64.sh
+          )
+          for f in "${files[@]}"; do cp "$f" "/tmp/orig/$(basename "$f")"; done
+
+          restore_scripts() {
+            for f in "${files[@]}"; do cp "/tmp/orig/$(basename "$f")" "$f"; done
+          }
+
+          prepare_k1280() {
+            python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+          }
+
+          set_flags() {
+            local mode="$1"
+            MODE="$mode" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          mode=os.environ['MODE']
+          paths=[
+            'benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh',
+            'benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh',
+            'benchmark_support/run_apple_cos53_apple_specific_eff.sh',
+            'benchmark_support/run_apple_cos53_hotloop_eff.sh',
+            'benchmark_support/run_apple_cos53_current_p64.sh',
+          ]
+          for q in paths:
+              p=Path(q); s=p.read_text()
+              if mode=='baseline':
+                  pass
+              elif mode=='contract_fast':
+                  s=s.replace('-ffp-contract=off','-ffp-contract=fast')
+              elif mode=='fast_math':
+                  s=s.replace('-fno-fast-math -ffp-contract=off','-ffast-math -ffp-contract=fast')
+              elif mode=='ofast':
+                  s=s.replace('-O3 -DNDEBUG','-Ofast -DNDEBUG')
+                  s=s.replace('-fno-fast-math -ffp-contract=off','-ffp-contract=fast')
+              else:
+                  raise SystemExit(mode)
+              p.write_text(s)
+          PY
+          }
+
+          build_stack() {
+            local label="$1"
+            restore_scripts
+            set_flags "$label"
+            prepare_k1280
+            bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+            cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_canonical_frozen_bench
+            bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+            cp /tmp/apple_cos53_cpu_eff_bench /tmp/apple_cos53_canonical_optimized_bench
+            bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh build
+
+            cp /tmp/apple_cos53_canonical_frozen_bench "/tmp/stacks/${label}_frozen"
+            cp /tmp/apple_cos53_canonical_optimized_bench "/tmp/stacks/${label}_optimized"
+            cp /tmp/apple_cos53_hotloop_bench "/tmp/stacks/${label}_hotloop"
+            cp /tmp/apple_cos53_hotloop_apple_specific_bench "/tmp/stacks/${label}_hotapple"
+            cp /tmp/apple_cos53_current_p64_bench "/tmp/stacks/${label}_p64"
+
+            echo "=== validate $label ===" | tee -a /tmp/out/accuracy.txt
+            bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh validate | tee -a /tmp/out/accuracy.txt
+          }
+
+          for label in baseline contract_fast fast_math ofast; do
+            build_stack "$label"
+          done
+
+          restore_scripts
+          prepare_k1280
+
+      - name: Screen compiler variants vs current baseline and Apple
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/screen.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 78000 80000 82000 100000 200000 500000 1000000)
+
+          activate() {
+            local label="$1"
+            cp "/tmp/stacks/${label}_frozen" /tmp/apple_cos53_canonical_frozen_bench
+            cp "/tmp/stacks/${label}_optimized" /tmp/apple_cos53_canonical_optimized_bench
+            cp "/tmp/stacks/${label}_hotloop" /tmp/apple_cos53_hotloop_bench
+            cp "/tmp/stacks/${label}_hotapple" /tmp/apple_cos53_hotloop_apple_specific_bench
+            cp "/tmp/stacks/${label}_p64" /tmp/apple_cos53_current_p64_bench
+          }
+
+          for r in 1 2; do
+            for n in "${sizes[@]}"; do
+              for label in baseline contract_fast fast_math ofast; do
+                activate "$label"
+                bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh one "$n" \
+                  | sed -E "s/stack=[^ ]+/stack=${label}/" \
+                  | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              done
+              /tmp/stacks/baseline_frozen apple "$n" \
+                | sed 's/stack=apple/stack=vvcos/' \
+                | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-compiler-flags-sweep
+          path: /tmp/out
+          if-no-files-found: error
