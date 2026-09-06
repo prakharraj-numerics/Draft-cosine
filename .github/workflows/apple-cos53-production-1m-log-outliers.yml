@@ -1,22 +1,19 @@
-name: Apple COS53 contract-fast p64 baseline final verify
+name: Apple COS53 CPU pockets screen above 50K
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - exp/apple-cos53-cpu-pockets-v1-20260906
     paths:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
-      - 'benchmark_support/run_apple_cos53_contract_fast_baseline.sh'
 
 concurrency:
-  group: apple-cos53-contract-fast-p64-baseline-final
+  group: apple-cos53-cpu-pockets-screen
   cancel-in-progress: true
 
 jobs:
-  verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: [1, 2, 3, 4]
+  screen:
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -24,74 +21,79 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build prior p64 baseline and materialized contract-fast baseline
+      - name: Build exact frozen baseline and configuration challengers
         shell: bash
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor 9ef125b86cbc996686daab5d3c7ebaa1b629e80d HEAD
+          git merge-base --is-ancestor b47b2fff19ad2c323de8ded704cb6ddc6573541c HEAD
           bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh build
+          bash benchmark_support/run_apple_cos53_cpu_pocket_attack.sh build
+          clang++ -O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=off \
+            -I/tmp -I/tmp/pthreadpool-install/include /tmp/apple_cos53_cpu_pocket_attack.cpp \
+            /tmp/pthreadpool-install/lib/libpthreadpool.a -framework Accelerate -pthread \
+            -o /tmp/apple_cos53_cpu_pocket_attack_off
 
-      - name: Assert production routing
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 77500)" == contract_fast ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 78000)" == contract_fast_p64 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 80000)" == contract_fast_p64 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 82000)" == contract_fast_p64 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 82500)" == contract_fast ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 100000)" == prior_baseline ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh route 500000)" == prior_baseline ]]
-
-      - name: Validate attack accuracy
-        if: matrix.slot == 1
+      - name: Screen local scheduler and partition pockets
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out
-          bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh validate | tee /tmp/out/accuracy.txt
+          OUT=/tmp/out/screen.txt
+          : > "$OUT"
+          sizes=(60000 70000 78000 80000 82000 90000 100000 150000 200000 300000 500000 750000 1000000)
+          custom=(ap2 ap3 ap4 \
+            wg2_user_s0 wg2_default_s0 wg2_utility_s0 wg2_user_s8 wg2_default_s8 wg2_utility_s8 \
+            wg3_user_s0 wg3_default_s0 wg3_utility_s0 wg3_user_s8 wg3_default_s8 wg3_utility_s8 \
+            wg4_user_s0 wg4_default_s0 wg4_utility_s0 wg4_user_s8 wg4_default_s8 wg4_utility_s8)
+          native=(pool2 pool3 adapt2)
+          oldwg=(wg2_user wg2_default wg2_utility wg3_user wg3_default wg3_utility)
 
-      - name: Benchmark final baseline vs prior p64 baseline vs Apple vvcos
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/out
-          OUT=/tmp/out/results.txt
-          echo "slot=${{ matrix.slot }} prior_baseline_sha=9ef125b86cbc996686daab5d3c7ebaa1b629e80d" > "$OUT"
-          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 78000 80000 82000 100000 200000 500000 1000000)
-
-          prior_one() {
+          activate_for_n() {
             local n="$1"
-            bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate off
-            bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh one "$n"
+            if (( n == 100000 || n == 500000 )); then
+              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate off
+            else
+              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
+            fi
+          }
+          custom_one() {
+            local mode="$1" n="$2"
+            if (( n == 100000 || n == 500000 )); then
+              /tmp/apple_cos53_cpu_pocket_attack_off "$mode" "$n"
+            else
+              /tmp/apple_cos53_cpu_pocket_attack "$mode" "$n"
+            fi
           }
 
-          final_one() {
-            local n="$1"
-            bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n"
-          }
-
-          apple_one() {
-            local n="$1"
-            /tmp/apple_cos53_off_frozen apple "$n"
-          }
-
-          for r in 0 1 2; do
+          for r in 1 2; do
             for n in "${sizes[@]}"; do
-              order=$(( (r + ${{ matrix.slot }} + n) % 3 ))
-              if (( order == 0 )); then seq=(final prior apple); elif (( order == 1 )); then seq=(prior apple final); else seq=(apple final prior); fi
-              for who in "${seq[@]}"; do
-                case "$who" in
-                  final) final_one "$n" | sed -E 's/stack=[^ ]+/stack=final_contract_fast/' ;;
-                  prior) prior_one "$n" | sed -E 's/stack=[^ ]+/stack=prior_p64_baseline/' ;;
-                  apple) apple_one "$n" | sed -E 's/stack=[^ ]+/stack=vvcos/' ;;
-                esac | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n" \
+                | sed -E 's/stack=[^ ]+/stack=BASELINE/' | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              for mode in "${native[@]}"; do
+                activate_for_n "$n"
+                bash benchmark_support/run_apple_cos53_hotloop_eff.sh one "$mode" "$n" \
+                  | sed -E "s/stack=[^ ]+/stack=native_${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
               done
+              for mode in "${oldwg[@]}"; do
+                activate_for_n "$n"
+                bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one "$mode" "$n" \
+                  | sed -E "s/stack=[^ ]+/stack=old_${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              done
+              for mode in "${custom[@]}"; do
+                custom_one "$mode" "$n" \
+                  | sed -E "s/stack=[^ ]+/stack=${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              done
+              if (( n == 78000 || n == 80000 || n == 82000 )); then
+                for mode in p56 p60 p64 p68; do
+                  custom_one "$mode" "$n" \
+                    | sed -E "s/stack=[^ ]+/stack=${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+                done
+              fi
             done
           done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-contract-fast-baseline-final-${{ matrix.slot }}
+          name: apple-cos53-cpu-pockets-screen
           path: /tmp/out
           if-no-files-found: error
