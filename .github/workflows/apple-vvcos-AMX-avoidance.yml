@@ -50,8 +50,6 @@ jobs:
           SRC=benchmark_support/bench_vvcos_amx_proxy.c
           xcrun clang -O3 -DNDEBUG -arch arm64 "$SRC" -framework Accelerate -o /tmp/vvcos_arm64
           file /tmp/vvcos_arm64
-
-          # Rosetta is normally present on Apple-Silicon GitHub runners; install if needed.
           if ! arch -x86_64 /usr/bin/uname -m >/tmp/rosetta_arch.txt 2>/dev/null; then
             sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
             arch -x86_64 /usr/bin/uname -m >/tmp/rosetta_arch.txt
@@ -128,8 +126,10 @@ jobs:
           done
 
       - name: Summarize medians
-        shell: python3
+        shell: bash
         run: |
+          set -euo pipefail
+          python3 <<'PY'
           import glob, re, statistics
           rows=[]
           for fn in glob.glob('/tmp/out/*.txt'):
@@ -147,6 +147,7 @@ jobs:
               for r in out:
                   f.write('%s\t%d\t%.9f\t%.9f\n'%r)
           print(open('/tmp/out/summary.tsv').read())
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
