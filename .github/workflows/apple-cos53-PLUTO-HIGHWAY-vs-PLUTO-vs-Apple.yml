@@ -1,0 +1,140 @@
+name: Apple COS53 PLUTO-HIGHWAY vs PLUTO vs Apple
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-PLUTO-HIGHWAY-20260906
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove frozen PLUTO untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUTO=d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+          git fetch origin freeze/apple-cos53-PLUTO-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$PLUTO"
+          git merge-base --is-ancestor "$PLUTO" HEAD
+      - name: Build Highway successor and controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh build
+          test -x /tmp/apple_cos53_pluto_highway_bench
+          test -x /tmp/apple_cos53_pluto_highway_validate
+          test -x /tmp/kernel_attack_no_p3
+          test -x /tmp/apple_cos53_off_frozen
+          echo "HIGHWAY_VERSION=$(git -C /tmp/highway describe --tags --always)"
+          echo "HIGHWAY_BYTES=$(stat -f %z /tmp/apple_cos53_pluto_highway_bench)"
+          echo "PLUTO_BYTES=$(stat -f %z /tmp/kernel_attack_no_p3)"
+          ! grep -E 'arm_neon|float64x2_t|vfmaq_|vld1q_' /tmp/apple_cos53_pluto_highway.cpp
+          grep -q 'hn::Full128<double>' /tmp/apple_cos53_pluto_highway.cpp
+          grep -q 'hn::MulAdd' /tmp/apple_cos53_pluto_highway.cpp
+      - name: MPFR accuracy gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          txt=$(bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh validate)
+          printf '%s\n' "$txt" | tee /tmp/highway_accuracy.txt
+          printf '%s\n' "$txt" | awk '
+            /APPLE_COS53_CPU_EFF_ACCURACY/ {
+              found=1; max=-1;
+              for(i=1;i<=NF;i++) if($i ~ /^maxulp=/){split($i,a,"="); max=a[2]+0}
+              if(max<0 || max>2){bad=1; print "accuracy failure:",$0 > "/dev/stderr"}
+            }
+            END{if(!found || bad) exit 1}
+          '
+      - name: 1M smoke timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh one 1000000
+          bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh pluto 1000000
+          bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh apple 1000000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-highway-smoke
+          path: /tmp/highway_accuracy.txt
+          if-no-files-found: error
+
+  benchmark:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove frozen PLUTO untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUTO=d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+          git fetch origin freeze/apple-cos53-PLUTO-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$PLUTO"
+          git merge-base --is-ancestor "$PLUTO" HEAD
+      - name: Build Highway successor and controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh build
+          test -x /tmp/apple_cos53_pluto_highway_bench
+          test -x /tmp/kernel_attack_no_p3
+          test -x /tmp/apple_cos53_off_frozen
+          mkdir -p /tmp/out
+          {
+            echo "slot=${{ matrix.slot }}"
+            echo "highway_version=$(git -C /tmp/highway describe --tags --always)"
+            echo "highway_bytes=$(stat -f %z /tmp/apple_cos53_pluto_highway_bench)"
+            echo "pluto_bytes=$(stat -f %z /tmp/kernel_attack_no_p3)"
+            echo "highway_undefined_symbols:"
+            nm -u /tmp/apple_cos53_pluto_highway_bench || true
+          } > /tmp/out/structure_${{ matrix.slot }}.txt
+          ! grep -E 'pthreadpool|pthread_set_qos|os_workgroup|vvcos' /tmp/out/structure_${{ matrix.slot }}.txt
+      - name: Full paired single-thread ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/results_${{ matrix.slot }}.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          for r in 1 2 3 4 5; do
+            idx=0
+            for n in "${sizes[@]}"; do
+              idx=$((idx+1))
+              m=$(((r+idx)%3))
+              if ((m==0)); then seq=(HIGHWAY PLUTO APPLE); elif ((m==1)); then seq=(PLUTO APPLE HIGHWAY); else seq=(APPLE HIGHWAY PLUTO); fi
+              for role in "${seq[@]}"; do
+                case "$role" in
+                  HIGHWAY) bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh one "$n" ;;
+                  PLUTO) bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh pluto "$n" ;;
+                  APPLE) bash benchmark_support/run_apple_cos53_PLUTO_HIGHWAY.sh apple "$n" ;;
+                esac \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n role=$role /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+          awk '
+            /role=(HIGHWAY|PLUTO|APPLE)/ {
+              for(i=1;i<=NF;i++) if($i ~ /^effective_cores=/){split($i,a,"="); if(a[2]>1.10){bad=1; print "single-thread failure:",$0 > "/dev/stderr"}}
+            }
+            END{exit bad}
+          ' "$OUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-highway-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
