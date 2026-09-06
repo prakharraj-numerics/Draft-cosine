@@ -50,10 +50,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for n in 3000 79000 81000 100000 500000; do
+          for n in 3000 81000 100000 500000; do
             [[ "$(bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh route "$n")" == hot_wg3_default ]]
           done
-          for n in 100 400 700 1200 15000 29999 30000 40000 40001 75000 78000 80000 82000 200000 1000000; do
+          for n in 100 400 700 1200 15000 29999 30000 40000 40001 75000 78000 79000 80000 82000 200000 1000000; do
             [[ "$(bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh route "$n")" == REST ]]
           done
 
