@@ -40,7 +40,7 @@ jobs:
           mkdir -p /tmp/out
           OUT=/tmp/out/screen.txt
           : > "$OUT"
-          sizes=(60000 70000 78000 80000 82000 90000 100000 150000 200000 300000 500000 750000 1000000)
+          sizes=(60000 70000 78000 80000 82000 90000 100000 200000 500000 1000000)
           custom=(ap2 ap3 ap4 \
             wg2_user_s0 wg2_default_s0 wg2_utility_s0 wg2_user_s8 wg2_default_s8 wg2_utility_s8 \
             wg3_user_s0 wg3_default_s0 wg3_utility_s0 wg3_user_s8 wg3_default_s8 wg3_utility_s8 \
@@ -56,6 +56,15 @@ jobs:
               bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
             fi
           }
+          baseline_one() {
+            local n="$1"
+            if (( n == 60000 || n == 70000 || n == 90000 )); then
+              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
+              /tmp/apple_cos53_fast_optimized auto "$n"
+            else
+              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n"
+            fi
+          }
           custom_one() {
             local mode="$1" n="$2"
             if (( n == 100000 || n == 500000 )); then
@@ -67,8 +76,7 @@ jobs:
 
           for r in 1 2; do
             for n in "${sizes[@]}"; do
-              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n" \
-                | sed -E 's/stack=[^ ]+/stack=BASELINE/' | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              baseline_one "$n" | sed -E 's/stack=[^ ]+/stack=BASELINE/' | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
               for mode in "${native[@]}"; do
                 activate_for_n "$n"
                 bash benchmark_support/run_apple_cos53_hotloop_eff.sh one "$mode" "$n" \
