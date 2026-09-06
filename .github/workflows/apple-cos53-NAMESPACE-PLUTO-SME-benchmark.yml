@@ -83,7 +83,7 @@ jobs:
             ldp x29,x30,[sp],#16
             ret
           ASM
-          C="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast"
+          C="-O3 -DNDEBUG -D_XOPEN_SOURCE=700 -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast"
           clang++ $C -I/tmp/pluto-art -c /tmp/capture.cpp -o /tmp/capture.o
           clang -c -march=armv9.2-a+sme+sme2 /tmp/wrap.s -o /tmp/wrap.o
           clang++ -Wl,-no_pie /tmp/capture.o /tmp/wrap.o -o /tmp/capture
