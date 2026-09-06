@@ -1,0 +1,167 @@
+name: Apple COS53 canonical CPU v2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-canonical-cpu-v2-20260906
+    paths:
+      - '.github/workflows/apple-cos53-canonical-cpu-v2.yml'
+
+concurrency:
+  group: apple-cos53-canonical-cpu-v2
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build canonical baseline and both CPU-efficiency layers
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          [[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+          cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_canonical_frozen_bench
+
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+          cp /tmp/apple_cos53_cpu_eff_bench /tmp/apple_cos53_canonical_optimized_bench
+
+          bash benchmark_support/run_apple_cos53_apple_specific_eff.sh build
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh build
+
+      - name: Validate hot-loop kernel
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Benchmark canonical versus CPU-improved candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} cpu=$(sysctl -n machdep.cpu.brand_string)" > "$OUT"
+          echo "canonical_sha=14c74c60c3d2507033c49fff10382ccc11c308e1" >> "$OUT"
+          echo "hotloop_sha=ae34c7cd6dca2bea1298543d83f1385d36d37038" >> "$OUT"
+          echo "acceptance=wall<=canonical AND cpu<canonical" >> "$OUT"
+
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 100000 200000 500000 1000000)
+
+          canonical_mode() {
+            case "$1" in
+              100) echo single ;;
+              400|700|1200|500000|1000000) echo frozen ;;
+              3000|7500|15000|50000|100000) echo auto ;;
+              5000|29999|40001) echo adapt2 ;;
+              30000|40000|200000) echo pool3 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          apple_eff_mode() {
+            case "$1" in
+              100) echo single_utility ;;
+              400) echo wg2_ui ;;
+              700) echo wg2_utility ;;
+              1200) echo wg2_ui ;;
+              3000) echo wg2_default ;;
+              5000) echo wg3_utility ;;
+              7500) echo none ;;
+              15000) echo wg3_user ;;
+              29999) echo wg3_utility ;;
+              30000) echo none ;;
+              40000) echo wg3_user ;;
+              40001) echo wg2_default ;;
+              50000) echo wg2_user ;;
+              100000|200000) echo none ;;
+              500000) echo wg3_default ;;
+              1000000) echo wg3_ui ;;
+              *) return 1 ;;
+            esac
+          }
+
+          run_canonical() {
+            local n="$1" mode="$2"
+            if [[ "$mode" == frozen ]]; then
+              /tmp/apple_cos53_canonical_frozen_bench candidate "$n" | sed 's/stack=candidate/stack=canonical/'
+            else
+              /tmp/apple_cos53_canonical_optimized_bench "$mode" "$n" | sed "s/stack=$mode/stack=canonical/"
+            fi
+          }
+
+          run_hot_same() {
+            local n="$1" mode="$2"
+            [[ "$mode" != frozen ]] || return 1
+            bash benchmark_support/run_apple_cos53_hotloop_eff.sh one "$mode" "$n" | sed "s/stack=$mode/stack=hot_same/"
+          }
+
+          run_hot_apple() {
+            local n="$1" mode="$2"
+            [[ "$mode" != none ]] || return 1
+            bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one "$mode" "$n" | sed "s/stack=$mode/stack=hot_apple/"
+          }
+
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              cm="$(canonical_mode "$n")"
+              am="$(apple_eff_mode "$n")"
+              selector=$(( (r + ${{ matrix.slot }}) % 3 ))
+              if (( selector == 0 )); then order=(canonical hot_same hot_apple)
+              elif (( selector == 1 )); then order=(hot_same hot_apple canonical)
+              else order=(hot_apple canonical hot_same)
+              fi
+
+              for who in "${order[@]}"; do
+                case "$who" in
+                  canonical)
+                    run_canonical "$n" "$cm" | sed "s/^/round=$((r+1)) n=$n canonical_mode=$cm apple_mode=$am /" | tee -a "$OUT" ;;
+                  hot_same)
+                    if [[ "$cm" != frozen ]]; then
+                      run_hot_same "$n" "$cm" | sed "s/^/round=$((r+1)) n=$n canonical_mode=$cm apple_mode=$am /" | tee -a "$OUT"
+                    fi ;;
+                  hot_apple)
+                    if [[ "$am" != none ]]; then
+                      run_hot_apple "$n" "$am" | sed "s/^/round=$((r+1)) n=$n canonical_mode=$cm apple_mode=$am /" | tee -a "$OUT"
+                    fi ;;
+                esac
+              done
+            done
+          done
+
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              /tmp/apple_cos53_canonical_frozen_bench apple "$n" | sed 's/stack=apple/stack=vvcos/' | sed "s/^/apple_round=$((r+1)) n=$n /" | tee -a "$OUT"
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-canonical-cpu-v2-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
