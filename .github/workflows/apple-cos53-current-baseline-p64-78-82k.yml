@@ -1,0 +1,99 @@
+name: Apple COS53 current baseline + p64 78K-82K
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - work/apple-cos53-current-vvcos-p64-78-82k-20260906
+    paths:
+      - '.github/workflows/apple-cos53-current-baseline-p64-78-82k.yml'
+      - 'benchmark_support/run_apple_cos53_current_p64.sh'
+      - 'benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh'
+
+concurrency:
+  group: apple-cos53-current-baseline-p64-78-82k
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact new baseline lineage plus p64
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+          cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_canonical_frozen_bench
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+          cp /tmp/apple_cos53_cpu_eff_bench /tmp/apple_cos53_canonical_optimized_bench
+          bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh build
+
+      - name: Assert routing boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh route 77500)" == canonical ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh route 78000)" == p64 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh route 80000)" == p64 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh route 82000)" == p64 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh route 82500)" == canonical ]]
+
+      - name: Validate unchanged kernel
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Benchmark integrated route vs prior baseline auto
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} parent_baseline_sha=70eea3cc4395d2643e9e4fea3824fee18d755c4f" > "$OUT"
+          sizes=(78000 80000 82000)
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              if (( (r + ${{ matrix.slot }}) % 2 == 0 )); then
+                bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh one "$n" \
+                  | sed -E 's/stack=[^ ]+/stack=new_baseline_p64/' \
+                  | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+                /tmp/apple_cos53_canonical_optimized_bench auto "$n" \
+                  | sed 's/stack=auto/stack=prior_baseline_auto/' \
+                  | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+              else
+                /tmp/apple_cos53_canonical_optimized_bench auto "$n" \
+                  | sed 's/stack=auto/stack=prior_baseline_auto/' \
+                  | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+                bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh one "$n" \
+                  | sed -E 's/stack=[^ ]+/stack=new_baseline_p64/' \
+                  | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT"
+              fi
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-current-baseline-p64-78-82k-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
