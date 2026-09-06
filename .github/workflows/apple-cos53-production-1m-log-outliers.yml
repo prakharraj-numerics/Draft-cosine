@@ -1,4 +1,4 @@
-name: Apple COS53 CPU pockets screen above 50K
+name: Apple COS53 CPU pockets confirm above 50K
 
 on:
   workflow_dispatch:
@@ -9,11 +9,15 @@ on:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-cpu-pockets-screen
+  group: apple-cos53-cpu-pockets-confirm
   cancel-in-progress: true
 
 jobs:
-  screen:
+  confirm:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4]
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -21,7 +25,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build exact frozen baseline and configuration challengers
+      - name: Build exact frozen baseline and selected challengers
         shell: bash
         run: |
           set -euo pipefail
@@ -33,20 +37,24 @@ jobs:
             /tmp/pthreadpool-install/lib/libpthreadpool.a -framework Accelerate -pthread \
             -o /tmp/apple_cos53_cpu_pocket_attack_off
 
-      - name: Screen local scheduler and partition pockets
+      - name: Validate unchanged hot kernels
+        if: matrix.slot == 1
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out
-          OUT=/tmp/out/screen.txt
+          bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy_fast.txt
+          bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate off
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy_off.txt
+
+      - name: Confirm selected pocket candidates vs frozen baseline and Apple
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
           : > "$OUT"
-          sizes=(60000 70000 78000 80000 82000 90000 100000 200000 500000 1000000)
-          custom=(ap2 ap3 ap4 \
-            wg2_user_s0 wg2_default_s0 wg2_utility_s0 wg2_user_s8 wg2_default_s8 wg2_utility_s8 \
-            wg3_user_s0 wg3_default_s0 wg3_utility_s0 wg3_user_s8 wg3_default_s8 wg3_utility_s8 \
-            wg4_user_s0 wg4_default_s0 wg4_utility_s0 wg4_user_s8 wg4_default_s8 wg4_utility_s8)
-          native=(pool2 pool3 adapt2)
-          oldwg=(wg2_user wg2_default wg2_utility wg3_user wg3_default wg3_utility)
 
           activate_for_n() {
             local n="$1"
@@ -56,14 +64,15 @@ jobs:
               bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
             fi
           }
-          baseline_one() {
-            local n="$1"
-            if (( n == 60000 || n == 70000 || n == 90000 )); then
-              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
-              /tmp/apple_cos53_fast_optimized auto "$n"
-            else
-              bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n"
-            fi
+          native_one() {
+            local mode="$1" n="$2"
+            activate_for_n "$n"
+            bash benchmark_support/run_apple_cos53_hotloop_eff.sh one "$mode" "$n"
+          }
+          oldwg_one() {
+            local mode="$1" n="$2"
+            activate_for_n "$n"
+            bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one "$mode" "$n"
           }
           custom_one() {
             local mode="$1" n="$2"
@@ -73,35 +82,42 @@ jobs:
               /tmp/apple_cos53_cpu_pocket_attack "$mode" "$n"
             fi
           }
+          apple_one() { /tmp/apple_cos53_off_frozen apple "$1"; }
 
-          for r in 1 2; do
-            for n in "${sizes[@]}"; do
-              baseline_one "$n" | sed -E 's/stack=[^ ]+/stack=BASELINE/' | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
-              for mode in "${native[@]}"; do
-                activate_for_n "$n"
-                bash benchmark_support/run_apple_cos53_hotloop_eff.sh one "$mode" "$n" \
-                  | sed -E "s/stack=[^ ]+/stack=native_${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+          for r in 1 2 3 4 5; do
+            for n in 78000 80000 82000 100000 200000 500000 1000000; do
+              case "$n" in
+                78000) candidates=(native_adapt2 old_wg2_utility old_wg3_utility) ;;
+                80000) candidates=(wg2_utility_s8 native_adapt2 old_wg2_utility) ;;
+                82000) candidates=(old_wg2_default wg2_utility_s0 native_pool2) ;;
+                100000) candidates=(native_pool3 wg3_utility_s8 wg2_default_s8) ;;
+                200000) candidates=(ap3 old_wg3_utility old_wg3_default) ;;
+                500000) candidates=(old_wg2_utility wg2_utility_s8 ap2) ;;
+                1000000) candidates=(wg3_default_s8 wg3_utility_s8 ap3) ;;
+              esac
+
+              order=$(( (r + ${{ matrix.slot }} + n/1000) % 5 ))
+              seq=(BASELINE "${candidates[0]}" "${candidates[1]}" "${candidates[2]}" APPLE)
+              for k in 0 1 2 3 4; do
+                who="${seq[$(((k+order)%5))]}"
+                case "$who" in
+                  BASELINE)
+                    bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n" | sed -E 's/stack=[^ ]+/stack=BASELINE/' ;;
+                  APPLE)
+                    apple_one "$n" | sed -E 's/stack=[^ ]+/stack=APPLE/' ;;
+                  native_*)
+                    native_one "${who#native_}" "$n" | sed -E "s/stack=[^ ]+/stack=${who}/" ;;
+                  old_*)
+                    oldwg_one "${who#old_}" "$n" | sed -E "s/stack=[^ ]+/stack=${who}/" ;;
+                  *)
+                    custom_one "$who" "$n" | sed -E "s/stack=[^ ]+/stack=${who}/" ;;
+                esac | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" | tee -a "$OUT"
               done
-              for mode in "${oldwg[@]}"; do
-                activate_for_n "$n"
-                bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one "$mode" "$n" \
-                  | sed -E "s/stack=[^ ]+/stack=old_${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
-              done
-              for mode in "${custom[@]}"; do
-                custom_one "$mode" "$n" \
-                  | sed -E "s/stack=[^ ]+/stack=${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
-              done
-              if (( n == 78000 || n == 80000 || n == 82000 )); then
-                for mode in p56 p60 p64 p68; do
-                  custom_one "$mode" "$n" \
-                    | sed -E "s/stack=[^ ]+/stack=${mode}/" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
-                done
-              fi
             done
           done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-cpu-pockets-screen
+          name: apple-cos53-cpu-pockets-confirm-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
