@@ -1,4 +1,4 @@
-name: Apple COS53 CPU pockets final integrated verify
+name: Apple COS53 candidate full ladder vs Apple M1
 
 on:
   workflow_dispatch:
@@ -9,11 +9,11 @@ on:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-cpu-pockets-final
+  group: apple-cos53-candidate-full-ladder
   cancel-in-progress: true
 
 jobs:
-  verify:
+  benchmark:
     strategy:
       fail-fast: false
       matrix:
@@ -25,20 +25,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build exact frozen baseline and hard-gated pocket map
+      - name: Build current frozen baseline lineage and candidate map
         shell: bash
         run: |
           set -euo pipefail
           git merge-base --is-ancestor b47b2fff19ad2c323de8ded704cb6ddc6573541c HEAD
           bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh build
 
-      - name: Assert selected routing
+      - name: Assert candidate routing
         shell: bash
         run: |
           set -euo pipefail
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 78000)" == old_wg3_utility ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 80000)" == wg2_utility_s8 ]]
-          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 82000)" == frozen_baseline ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 82000)" == old_wg2_default ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 100000)" == native_pool3_off ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 200000)" == old_wg3_utility ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 500000)" == frozen_baseline ]]
@@ -55,23 +55,22 @@ jobs:
           bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate off
           bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy_off.txt
 
-      - name: Benchmark selected map vs frozen baseline vs Apple
+      - name: Benchmark full candidate ladder against Apple vvcos
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out
           OUT=/tmp/out/results.txt
           : > "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 78000 80000 82000 100000 200000 500000 1000000)
           for r in 1 2 3; do
-            for n in 78000 80000 82000 100000 200000 500000 1000000; do
-              order=$(( (r + ${{ matrix.slot }} + n/1000) % 3 ))
-              if (( order == 0 )); then seq=(SELECTED BASELINE APPLE); elif (( order == 1 )); then seq=(BASELINE APPLE SELECTED); else seq=(APPLE SELECTED BASELINE); fi
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }} + n) % 2 ))
+              if (( order == 0 )); then seq=(CANDIDATE APPLE); else seq=(APPLE CANDIDATE); fi
               for who in "${seq[@]}"; do
                 case "$who" in
-                  SELECTED)
-                    bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh one "$n" | sed -E 's/stack=[^ ]+/stack=SELECTED/' ;;
-                  BASELINE)
-                    bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n" | sed -E 's/stack=[^ ]+/stack=BASELINE/' ;;
+                  CANDIDATE)
+                    bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh one "$n" | sed -E 's/stack=[^ ]+/stack=CANDIDATE/' ;;
                   APPLE)
                     /tmp/apple_cos53_off_frozen apple "$n" | sed -E 's/stack=[^ ]+/stack=APPLE/' ;;
                 esac | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" | tee -a "$OUT"
@@ -81,6 +80,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-cpu-pockets-final2-${{ matrix.slot }}
+          name: apple-cos53-candidate-full-ladder-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
