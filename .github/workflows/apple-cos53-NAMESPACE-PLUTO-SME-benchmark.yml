@@ -1,4 +1,4 @@
-name: Apple COS53 Namespace PLUTO SME production-path isolate
+name: Apple COS53 Namespace PLUTO SME final SIGILL test
 on:
   workflow_dispatch:
   push:
@@ -31,11 +31,11 @@ jobs:
           github-token: ${{ github.token }}
           repository: prakharraj-numerics/Draft-cosine
           run-id: 34051479551
-      - name: Build exact production-path probes
+      - name: Build final differential probe
         shell: bash
         run: |
           set -euo pipefail
-          cat >/tmp/prodprobe.cpp <<'CPP'
+          cat >/tmp/finalprobe.cpp <<'CPP'
           #include <arm_sve.h>
           #include <cstdint>
           #include <cstdio>
@@ -49,51 +49,39 @@ jobs:
             auto sm=svdup_u64(UINT64_C(0x8000000000000000)); auto rhu=svreinterpret_u64_f64(rh); auto rs=svand_u64_x(pg,rhu,sm); auto ah=svreinterpret_f64_u64(svbic_u64_x(pg,rhu,sm)); auto al=svreinterpret_f64_u64(sveor_u64_x(pg,svreinterpret_u64_f64(rl),rs));
             auto jm=svadd_n_f64_x(pg,svmul_n_f64_x(pg,ah,KGRID),0x1p52); auto jd=svsub_n_f64_x(pg,jm,0x1p52); auto ji=svand_n_u64_x(pg,svreinterpret_u64_f64(jm),(UINT64_C(1)<<52)-1);
             auto delta=svmla_n_f64_x(pg,ah,jd,NINVK_HI); delta=svmla_n_f64_x(pg,delta,jd,NINVK_LO); delta=svadd_f64_x(pg,delta,al);
-            svst1_u64(pg,jt,ji); auto bits=reinterpret_cast<const uint64_t*>(opt_cos53_coeff_aos); uint64_t lanes=svcntp_b64(pg,pg);
+            svst1_u64(pg,jt,ji); auto bits=reinterpret_cast<const uint64_t*>(opt_cos53_coeff_aos); uint64_t lanes=8;
             for(uint64_t l=0;l<lanes;l++){uint64_t j=jt[l];auto q=bits+2*j;c0b[l]=q[0];c1b[l]=q[1];if(rep && j>=2009)rep[nr++]=base+l;}
             auto c0=svreinterpret_f64_u64(svld1_u64(pg,c0b)); auto c1=svreinterpret_f64_u64(svld1_u64(pg,c1b)); auto c2=svmul_n_f64_x(pg,c0,MH); auto c3=svmul_n_f64_x(pg,c1,M6); auto p=svmla_f64_x(pg,c2,c3,delta);p=svmla_f64_x(pg,c1,p,delta);p=svmla_f64_x(pg,c0,p,delta);auto par=svand_n_u64_x(pg,qbits,1);auto os=svlsl_n_u64_x(pg,par,63);p=svreinterpret_f64_u64(sveor_u64_x(pg,svreinterpret_u64_f64(p),os));svst1_f64(pg,y,p);
           }
-          extern "C" size_t pa(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
-          extern "C" size_t pb(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
-          extern "C" size_t pc(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
-          extern "C" size_t pd(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
-          extern "C" size_t pa(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;svbool_t pg=svptrue_b64();for(size_t i=0;i+8<=n;i+=8)body(pg,x+i,y+i,jt,a,b,i,nullptr,nr);return nr;}
-          extern "C" size_t pb(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;for(size_t i=0;i<n;i+=8){svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);body(pg,x+i,y+i,jt,a,b,i,nullptr,nr);}return nr;}
-          extern "C" size_t pc(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;for(size_t i=0;i<n;i+=8){svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);body(pg,x+i,y+i,jt,a,b,i,r,nr);}return nr;}
-          extern "C" size_t pd(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;for(size_t i=0;i<n;i+=8){svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);body(pg,x+i,y+i,jt,a,b,i,r,nr);}return nr;}
-          extern "C" size_t rawa(const double*,double*,size_t,uint64_t*),rawb(const double*,double*,size_t,uint64_t*),rawc(const double*,double*,size_t,uint64_t*),rawd(const double*,double*,size_t,uint64_t*);
-          int main(int argc,char**argv){alignas(64) double x[24],y[24]{};alignas(64) uint64_t r[24]{};for(int i=0;i<24;i++)x[i]=0.05*(i+1);char k=argc>1?argv[1][0]:'?';size_t n=(k=='a'?16:k=='b'?16:k=='c'?13:13),nr=0;if(k=='a')nr=rawa(x,y,n,r);if(k=='b')nr=rawb(x,y,n,r);if(k=='c')nr=rawc(x,y,n,r);if(k=='d')nr=rawd(x,y,n,r);std::printf("PROD_%c_OK n=%zu nr=%zu y0=%.17g ylast=%.17g\n",k,n,nr,y[0],y[n-1]);}
+          extern "C" size_t p(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
+          extern "C" size_t p(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;svbool_t pg=svptrue_b64();for(size_t i=0;i+8<=n;i+=8)body(pg,x+i,y+i,jt,a,b,i,nullptr,nr);return nr;}
+          extern "C" size_t raw(const double*,double*,size_t,uint64_t*);
+          int main(){alignas(64) double x[16],y[16]{};alignas(64) uint64_t r[16]{};for(int i=0;i<16;i++)x[i]=0.05*(i+1);size_t nr=raw(x,y,16,r);std::printf("FINAL_OK n=16 nr=%zu y0=%.17g y15=%.17g\n",nr,y[0],y[15]);}
           CPP
           cat >/tmp/wrap.s <<'ASM'
           .text
-          .macro W s
-          .globl _raw\s
+          .globl _raw
           .p2align 2
-          _raw\s:
+          _raw:
             stp x29,x30,[sp,#-16]!
             mov x29,sp
             smstart sm
-            bl _p\s
+            bl _p
             smstop sm
             ldp x29,x30,[sp],#16
             ret
-          .endm
-          W a
-          W b
-          W c
-          W d
           ASM
           C="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast"
-          clang++ $C -I/tmp/pluto-art -c /tmp/prodprobe.cpp -o /tmp/prodprobe.o
+          clang++ $C -I/tmp/pluto-art -c /tmp/finalprobe.cpp -o /tmp/finalprobe.o
           clang -c -march=armv9.2-a+sme+sme2 /tmp/wrap.s -o /tmp/wrap.o
-          clang++ /tmp/prodprobe.o /tmp/wrap.o -o /tmp/prodprobe
-      - name: Execute production-only pieces independently
+          clang++ /tmp/finalprobe.o /tmp/wrap.o -o /tmp/finalprobe
+          clang++ $C -I/tmp/pluto-art -S /tmp/finalprobe.cpp -o /tmp/finalprobe.s
+          if grep -q '\bcntp\b' /tmp/finalprobe.s; then echo 'ERROR: CNTP still present'; exit 1; fi
+      - name: Execute final differential probe
         shell: bash
         run: |
           set +e
-          for k in a b c d; do
-            echo "=== PROD $k ==="
-            /tmp/prodprobe "$k"
-            echo "PROD_${k}_RC=$?"
-          done
+          /tmp/finalprobe
+          rc=$?
+          echo "FINAL_RC=$rc"
           exit 0
