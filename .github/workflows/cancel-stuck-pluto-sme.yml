@@ -1,0 +1,23 @@
+name: Cancel stuck PLUTO SME benchmark
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-PLUTO-SME-M4-20260906
+    paths:
+      - .github/workflows/cancel-stuck-pluto-sme.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel stuck run 34053913083
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method POST repos/${GITHUB_REPOSITORY}/actions/runs/34053913083/cancel || true
