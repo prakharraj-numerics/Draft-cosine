@@ -1,4 +1,4 @@
-name: Apple COS53 Instruments live probe
+name: Apple COS53 REST vs Apple Instruments 3K 78K
 
 on:
   workflow_dispatch:
@@ -9,65 +9,148 @@ on:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-instruments-probe
+  group: apple-cos53-rest-instruments-3k-78k
   cancel-in-progress: true
 
 jobs:
-  probe:
+  profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2]
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Prove frozen REST plus workflow only
         shell: bash
         run: |
           set -euo pipefail
           REST=925ae7aad2a8878e325f521b1dcc69d5eb443e99
           git merge-base --is-ancestor "$REST" HEAD
+          test "$(git hash-object benchmark_support/run_apple_cos53_WORK_smooth_switch.sh)" = f33a3187b191c076397f433c56111b2f041dfa4a
           changed="$(git diff --name-only "$REST" HEAD | sort)"
           test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
-      - name: Record finite CPU Counters and Time Profiler probes
+
+      - name: Lengthen profiling windows only and build exact REST
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          hits=0
+          for p in Path('benchmark_support').glob('*.sh'):
+              s=p.read_text()
+              n=s.count('2000000/n')
+              if n:
+                  p.write_text(s.replace('2000000/n','300000000/n'))
+                  hits += n
+          p=Path('benchmark_support/apple_cos53_highway_benchmark.cpp')
+          s=p.read_text()
+          a=s.count('12000000/(n*6)')
+          if a:
+              p.write_text(s.replace('12000000/(n*6)','300000000/(n*6)'))
+          print('rest_rep_patch_hits',hits,'apple_rep_patch_hits',a)
+          assert hits >= 1 and a >= 1
+          PY
+          bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh build
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 3000)" == WORK ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 78000)" == WORK ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 78000)" == old_wg3_utility ]]
+
+      - name: Record reference wall and CPU numbers
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out
-          cat >/tmp/cpuburn.py <<'PY'
-          import time, math
-          end=time.monotonic()+1.5
-          x=0.123456789
-          i=0
-          while time.monotonic()<end:
-              x=math.fma(x,1.0000000001,0.0000000003) if hasattr(math,'fma') else x*1.0000000001+0.0000000003
-              i+=1
-          print(i,x)
-          PY
-          python3 - <<'PY' | tee /tmp/out/live.txt
+          : > /tmp/out/reference.txt
+          for n in 3000 78000; do
+            if (( (${{ matrix.slot }} + n) % 2 == 0 )); then seq=(REST APPLE); else seq=(APPLE REST); fi
+            for who in "${seq[@]}"; do
+              if [[ "$who" == REST ]]; then
+                bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh one "$n"
+              else
+                /tmp/apple_cos53_off_frozen apple "$n"
+              fi | sed "s/^/slot=${{ matrix.slot }} who=$who n=$n /" | tee -a /tmp/out/reference.txt
+            done
+          done
+
+      - name: Time Profiler REST and Apple at 3K and 78K
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee /tmp/out/xctrace-status.txt
           import subprocess,os
-          for template,tag in [('CPU Counters','counters'),('Time Profiler','time')]:
-              out=f'/tmp/out/{tag}.trace'
-              print(f'=== RECORD {template} ===',flush=True)
-              cmd=['xcrun','xctrace','record','--template',template,'--time-limit','3s','--output',out,'--target-stdout','/dev/null','--no-prompt','--launch','--','/usr/bin/python3','/tmp/cpuburn.py']
-              try:
-                  p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=15)
-                  print(p.stdout,end=''); print('RC',p.returncode,'TRACE_EXISTS',os.path.isdir(out))
-              except subprocess.TimeoutExpired as e:
-                  print('RECORD_TIMEOUT',template,e.stdout or '')
-              if os.path.isdir(out):
-                  toc=f'/tmp/out/{tag}-toc.xml'
-                  try:
-                      p=subprocess.run(['xcrun','xctrace','export','--input',out,'--toc','--output',toc],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=15)
-                      print('EXPORT_RC',p.returncode,p.stdout)
-                      if os.path.exists(toc):
-                          txt=open(toc,errors='replace').read()
-                          print(f'=== TOC {tag} ===')
-                          print(txt[:30000])
-                  except subprocess.TimeoutExpired as e:
-                      print('EXPORT_TIMEOUT',tag,e.stdout or '')
+          slot=${{ matrix.slot }}
+          cases=[('REST',3000),('APPLE',3000),('REST',78000),('APPLE',78000)]
+          if slot % 2 == 0:
+              cases=list(reversed(cases))
+          for who,n in cases:
+              tag=f'{who.lower()}_{n}'
+              trace=f'/tmp/out/{tag}.trace'
+              stdout=f'/tmp/out/{tag}.run.txt'
+              if who=='REST':
+                  target=['/bin/bash','benchmark_support/run_apple_cos53_WORK_smooth_switch.sh','one',str(n)]
+              else:
+                  target=['/tmp/apple_cos53_off_frozen','apple',str(n)]
+              cmd=['xcrun','xctrace','record','--template','Time Profiler','--output',trace,'--target-stdout',stdout,'--no-prompt','--launch','--']+target
+              print('RECORD',who,n,' '.join(target),flush=True)
+              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=45)
+              print(p.stdout,end='')
+              print('RC',p.returncode,'trace',os.path.isdir(trace),flush=True)
+              if p.returncode != 0 or not os.path.isdir(trace):
+                  raise SystemExit(f'xctrace failed {who} {n}')
+              exports=[
+                  ('toc',['--toc']),
+                  ('time-profile',['--xpath','/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]']),
+                  ('time-sample',['--xpath','/trace-toc/run[@number="1"]/data/table[@schema="time-sample"]']),
+              ]
+              for kind,args in exports:
+                  out=f'/tmp/out/{tag}-{kind}.xml'
+                  ecmd=['xcrun','xctrace','export','--input',trace]+args+['--output',out]
+                  ep=subprocess.run(ecmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=30)
+                  print('EXPORT',tag,kind,'rc',ep.returncode,'bytes',os.path.getsize(out) if os.path.exists(out) else -1)
+                  if ep.stdout: print(ep.stdout,end='')
           PY
+
+      - name: Capture ARM64 disassembly and symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '=== 3K REST binary: canonical optimized ==='
+            nm -nm /tmp/apple_cos53_canonical_optimized_bench || true
+            echo '=== 78K REST binary: hotloop apple-specific ==='
+            nm -nm /tmp/apple_cos53_hotloop_apple_specific_bench || true
+            echo '=== Apple vvcos comparison binary ==='
+            nm -nm /tmp/apple_cos53_off_frozen || true
+          } > /tmp/out/symbols.txt 2>&1
+          otool -tvV /tmp/apple_cos53_canonical_optimized_bench > /tmp/out/rest3k-disasm.txt
+          otool -tvV /tmp/apple_cos53_hotloop_apple_specific_bench > /tmp/out/rest78k-disasm.txt
+          otool -tvV /tmp/apple_cos53_off_frozen > /tmp/out/apple-disasm.txt
+          python3 - <<'PY' > /tmp/out/instruction-summary.txt
+          import re
+          files={'REST_3K':'/tmp/out/rest3k-disasm.txt','REST_78K':'/tmp/out/rest78k-disasm.txt','APPLE_WRAPPER':'/tmp/out/apple-disasm.txt'}
+          pats={
+            'fmla/fmadd':r'\b(?:fmla|fmadd)\b',
+            'fmul':r'\bfmul\b',
+            'fadd/fsub':r'\bf(?:add|sub)\b',
+            'loads':r'\b(?:ldr|ldp|ld1|ldur)\b',
+            'stores':r'\b(?:str|stp|st1|stur)\b',
+            'fp-int-conv':r'\b(?:fcvt|scvtf|ucvtf|fcvtns|fcvtzs|fcvtzu)\w*\b',
+            'branches':r'\b(?:b\.|b\s|bl\s|blr\s|cbz\s|cbnz\s|tbz\s|tbnz\s)'
+          }
+          for name,path in files.items():
+              txt=open(path,errors='replace').read().lower()
+              print(name)
+              for k,p in pats.items(): print(k,len(re.findall(p,txt)))
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-instruments-live-probe
+          name: apple-cos53-instruments-3k-78k-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
