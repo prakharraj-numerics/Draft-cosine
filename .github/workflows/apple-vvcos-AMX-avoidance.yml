@@ -1,0 +1,155 @@
+name: Apple vvcos AMX avoidance probe
+
+on:
+  push:
+    branches:
+      - exp/apple-vvcos-AMX-avoidance-20260906
+  workflow_dispatch:
+
+concurrency:
+  group: apple-vvcos-amx-avoidance
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2]
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hardware and AMX visibility probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          {
+            echo "slot=${{ matrix.slot }}"
+            uname -a
+            uname -m
+            sysctl -n machdep.cpu.brand_string || true
+            echo "--- AMX-like sysctls ---"
+            sysctl -a 2>/dev/null | grep -i amx || true
+            echo "--- candidate keys ---"
+            for k in hw.optional.amx_version hw.optional.arm.FEAT_AMX hw.optional.arm.FEAT_AMX2; do
+              printf '%s=' "$k"
+              sysctl -n "$k" 2>/dev/null || echo '<absent>'
+            done
+          } | tee /tmp/out/hardware.txt
+
+      - name: Build native and Rosetta vvcos benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=benchmark_support/bench_vvcos_amx_proxy.c
+          xcrun clang -O3 -DNDEBUG -arch arm64 "$SRC" -framework Accelerate -o /tmp/vvcos_arm64
+          file /tmp/vvcos_arm64
+
+          # Rosetta is normally present on Apple-Silicon GitHub runners; install if needed.
+          if ! arch -x86_64 /usr/bin/uname -m >/tmp/rosetta_arch.txt 2>/dev/null; then
+            sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+            arch -x86_64 /usr/bin/uname -m >/tmp/rosetta_arch.txt
+          fi
+          cat /tmp/rosetta_arch.txt
+          xcrun clang -O3 -DNDEBUG -arch x86_64 "$SRC" -framework Accelerate -o /tmp/vvcos_x86_64
+          file /tmp/vvcos_x86_64
+
+      - name: Native vvcos baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/native.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          for r in 1 2 3 4 5; do
+            for n in "${sizes[@]}"; do
+              env VECLIB_MAXIMUM_THREADS=1 /tmp/vvcos_arm64 "$n" \
+                | sed "s/^/slot=${{ matrix.slot }} mode=NATIVE round=$r /" \
+                | tee -a "$OUT"
+            done
+          done
+
+      - name: Attempt real AMX disable if a writable public-looking key exists
+        id: amxblock
+        shell: bash
+        run: |
+          set -euo pipefail
+          BLOCKED=0
+          : > /tmp/out/amx-disable-attempt.txt
+          for k in hw.optional.amx_version hw.optional.arm.FEAT_AMX hw.optional.arm.FEAT_AMX2; do
+            if sysctl -n "$k" >/dev/null 2>&1; then
+              old="$(sysctl -n "$k")"
+              echo "found $k=$old" | tee -a /tmp/out/amx-disable-attempt.txt
+              if sudo sysctl -w "$k=0" 2>&1 | tee -a /tmp/out/amx-disable-attempt.txt; then
+                now="$(sysctl -n "$k" 2>/dev/null || true)"
+                echo "after $k=$now" | tee -a /tmp/out/amx-disable-attempt.txt
+                if [[ "$now" == "0" ]]; then BLOCKED=1; fi
+              fi
+            fi
+          done
+          echo "blocked=$BLOCKED" >> "$GITHUB_OUTPUT"
+          echo "AMX_BLOCKED=$BLOCKED" | tee -a /tmp/out/amx-disable-attempt.txt
+
+      - name: Native vvcos after real AMX disable
+        if: steps.amxblock.outputs.blocked == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/native-amx-blocked.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          for r in 1 2 3 4 5; do
+            for n in "${sizes[@]}"; do
+              env VECLIB_MAXIMUM_THREADS=1 /tmp/vvcos_arm64 "$n" \
+                | sed "s/^/slot=${{ matrix.slot }} mode=NATIVE_AMX_BLOCKED round=$r /" \
+                | tee -a "$OUT"
+            done
+          done
+
+      - name: Rosetta x86_64 vvcos AMX-avoidance proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/rosetta.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          for r in 1 2 3 4 5; do
+            for n in "${sizes[@]}"; do
+              env VECLIB_MAXIMUM_THREADS=1 arch -x86_64 /tmp/vvcos_x86_64 "$n" \
+                | sed "s/^/slot=${{ matrix.slot }} mode=ROSETTA_X86_PROXY round=$r /" \
+                | tee -a "$OUT"
+            done
+          done
+
+      - name: Summarize medians
+        shell: python3
+        run: |
+          import glob, re, statistics
+          rows=[]
+          for fn in glob.glob('/tmp/out/*.txt'):
+              for line in open(fn, errors='ignore'):
+                  m=re.search(r'mode=(\S+).*?n=(\d+).*?wall_ns_per_el=([0-9.]+).*?cpu_ns_per_el=([0-9.]+)', line)
+                  if m:
+                      rows.append((m.group(1), int(m.group(2)), float(m.group(3)), float(m.group(4))))
+          keys=sorted({(m,n) for m,n,_,_ in rows}, key=lambda x:(x[1],x[0]))
+          out=[]
+          for mode,n in keys:
+              vals=[r for r in rows if r[0]==mode and r[1]==n]
+              out.append((mode,n,statistics.median(v[2] for v in vals),statistics.median(v[3] for v in vals)))
+          with open('/tmp/out/summary.tsv','w') as f:
+              f.write('mode\tn\tmedian_wall_ns_per_el\tmedian_cpu_ns_per_el\n')
+              for r in out:
+                  f.write('%s\t%d\t%.9f\t%.9f\n'%r)
+          print(open('/tmp/out/summary.tsv').read())
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vvcos-amx-avoidance-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
