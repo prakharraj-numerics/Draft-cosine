@@ -1,0 +1,29 @@
+name: Apple COS53 PLUTO HIGHWAY source dump
+on:
+  push:
+    branches: [exp/apple-cos53-PLUTO-HIGHWAY-20260906]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dump:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove frozen PLUTO untouched
+        shell: bash
+        run: |
+          test "$(git rev-parse freeze/apple-cos53-PLUTO-20260906)" = d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+      - name: Build exact PLUTO
+        shell: bash
+        run: |
+          bash benchmark_support/run_apple_cos53_PLUTO.sh build
+          test -f /tmp/kernel_attack_no_p3.cpp
+          cp /tmp/kernel_attack_no_p3.cpp ./pluto_no_p3_exact.cpp
+          cp /tmp/apple_cos53_coeff_aos.h ./pluto_coeff_aos_exact.h
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-highway-source-dump
+          path: |
+            pluto_no_p3_exact.cpp
+            pluto_coeff_aos_exact.h
