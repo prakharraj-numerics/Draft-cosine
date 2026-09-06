@@ -1,4 +1,4 @@
-name: Apple COS53 Namespace PLUTO SME SIGILL isolate
+name: Apple COS53 Namespace PLUTO SME production-path isolate
 on:
   workflow_dispatch:
   push:
@@ -31,104 +31,69 @@ jobs:
           github-token: ${{ github.token }}
           repository: prakharraj-numerics/Draft-cosine
           run-id: 34051479551
-      - name: Build staged probes
+      - name: Build exact production-path probes
         shell: bash
         run: |
           set -euo pipefail
-          cat >/tmp/probe.cpp <<'CPP'
+          cat >/tmp/prodprobe.cpp <<'CPP'
           #include <arm_sve.h>
           #include <cstdint>
           #include <cstdio>
           #include "apple_cos53_coeff_aos.h"
-          static constexpr double INVPI = 0x1.45f306dc9c883p-2;
-          static constexpr double KGRID = 1280.0;
-          static constexpr double NINVK_HI = -0x1.999999999999ap-11;
-          static constexpr double NINVK_LO = 0x1.999999999999ap-65;
-          static constexpr double PI_P1 = 0x1.921fb54442000p+1;
-          static constexpr double PI_P2 = 0x1.a308d313198a3p-40;
-          static constexpr double MH = -0x1.ffffff92c5f94p-2;
-          static constexpr double M6 = -0x1.5555551eb851fp-3;
-          extern "C" void p1(const double*x,double*y) __arm_streaming;
-          extern "C" void p2(const double*x,double*y) __arm_streaming;
-          extern "C" void p3(const double*x,double*y) __arm_streaming;
-          extern "C" void p4(const double*x,double*y) __arm_streaming;
-          extern "C" void p1(const double*x,double*y) __arm_streaming {
-            svbool_t pg=svptrue_b64(); auto v=svld1_f64(pg,x); svst1_f64(pg,y,v);
-          }
-          extern "C" void p2(const double*x,double*y) __arm_streaming {
-            alignas(64) uint64_t jt[8];
-            svbool_t pg=svptrue_b64(); auto v=svld1_f64(pg,x); auto a=svabs_f64_x(pg,v);
-            auto js=svmul_n_f64_x(pg,a,KGRID); auto jm=svadd_n_f64_x(pg,js,0x1p52);
-            auto ji=svand_n_u64_x(pg,svreinterpret_u64_f64(jm),(UINT64_C(1)<<52)-1);
-            svst1_u64(pg,jt,ji); svst1_f64(pg,y,a);
-          }
-          extern "C" void p3(const double*x,double*y) __arm_streaming {
-            alignas(64) uint64_t jt[8], c0b[8], c1b[8];
-            svbool_t pg=svptrue_b64(); auto v=svld1_f64(pg,x); auto a=svabs_f64_x(pg,v);
-            auto js=svmul_n_f64_x(pg,a,KGRID); auto jm=svadd_n_f64_x(pg,js,0x1p52);
-            auto ji=svand_n_u64_x(pg,svreinterpret_u64_f64(jm),(UINT64_C(1)<<52)-1);
-            svst1_u64(pg,jt,ji);
-            auto bits=reinterpret_cast<const uint64_t*>(opt_cos53_coeff_aos);
-            for(int l=0;l<8;l++){ auto q=bits+2*jt[l]; c0b[l]=q[0]; c1b[l]=q[1]; }
-            auto c0=svreinterpret_f64_u64(svld1_u64(pg,c0b));
-            auto c1=svreinterpret_f64_u64(svld1_u64(pg,c1b));
-            auto z=svadd_f64_x(pg,c0,c1); svst1_f64(pg,y,z);
-          }
-          extern "C" void p4(const double*x,double*y) __arm_streaming {
-            alignas(64) uint64_t jt[8], c0b[8], c1b[8];
-            svbool_t pg=svptrue_b64(); auto xv=svld1_f64(pg,x); auto ax=svabs_f64_x(pg,xv);
+          static constexpr double INVPI=0x1.45f306dc9c883p-2,KGRID=1280.0,NINVK_HI=-0x1.999999999999ap-11,NINVK_LO=0x1.999999999999ap-65,PI_P1=0x1.921fb54442000p+1,PI_P2=0x1.a308d313198a3p-40,MH=-0x1.ffffff92c5f94p-2,M6=-0x1.5555551eb851fp-3;
+          static inline void body(svbool_t pg,const double*x,double*y,uint64_t*jt,uint64_t*c0b,uint64_t*c1b,uint64_t base,uint64_t*rep,size_t&nr){
+            auto xv=svld1_f64(pg,x); auto ax=svabs_f64_x(pg,xv);
             auto qscaled=svmul_n_f64_x(pg,ax,INVPI); auto qmagic=svadd_n_f64_x(pg,qscaled,0x1p52); auto qd=svsub_n_f64_x(pg,qmagic,0x1p52); auto qbits=svreinterpret_u64_f64(qmagic);
             auto qp1=svmul_n_f64_x(pg,qd,PI_P1); auto t=svsub_f64_x(pg,ax,qp1); auto rh=svmla_n_f64_x(pg,t,qd,-PI_P2);
             auto d=svsub_f64_x(pg,t,rh); auto rl=svmla_n_f64_x(pg,d,qd,-PI_P2);
-            auto signmask=svdup_u64(UINT64_C(0x8000000000000000)); auto rhu=svreinterpret_u64_f64(rh); auto rsign=svand_u64_x(pg,rhu,signmask);
-            auto ah=svreinterpret_f64_u64(svbic_u64_x(pg,rhu,signmask)); auto al=svreinterpret_f64_u64(sveor_u64_x(pg,svreinterpret_u64_f64(rl),rsign));
-            auto jscaled=svmul_n_f64_x(pg,ah,KGRID); auto jmagic=svadd_n_f64_x(pg,jscaled,0x1p52); auto jd=svsub_n_f64_x(pg,jmagic,0x1p52); auto jidx=svand_n_u64_x(pg,svreinterpret_u64_f64(jmagic),(UINT64_C(1)<<52)-1);
+            auto sm=svdup_u64(UINT64_C(0x8000000000000000)); auto rhu=svreinterpret_u64_f64(rh); auto rs=svand_u64_x(pg,rhu,sm); auto ah=svreinterpret_f64_u64(svbic_u64_x(pg,rhu,sm)); auto al=svreinterpret_f64_u64(sveor_u64_x(pg,svreinterpret_u64_f64(rl),rs));
+            auto jm=svadd_n_f64_x(pg,svmul_n_f64_x(pg,ah,KGRID),0x1p52); auto jd=svsub_n_f64_x(pg,jm,0x1p52); auto ji=svand_n_u64_x(pg,svreinterpret_u64_f64(jm),(UINT64_C(1)<<52)-1);
             auto delta=svmla_n_f64_x(pg,ah,jd,NINVK_HI); delta=svmla_n_f64_x(pg,delta,jd,NINVK_LO); delta=svadd_f64_x(pg,delta,al);
-            svst1_u64(pg,jt,jidx); auto bits=reinterpret_cast<const uint64_t*>(opt_cos53_coeff_aos);
-            for(int l=0;l<8;l++){ auto q=bits+2*jt[l]; c0b[l]=q[0]; c1b[l]=q[1]; }
-            auto c0=svreinterpret_f64_u64(svld1_u64(pg,c0b)); auto c1=svreinterpret_f64_u64(svld1_u64(pg,c1b));
-            auto c2=svmul_n_f64_x(pg,c0,MH); auto c3=svmul_n_f64_x(pg,c1,M6); auto p=svmla_f64_x(pg,c2,c3,delta); p=svmla_f64_x(pg,c1,p,delta); p=svmla_f64_x(pg,c0,p,delta);
-            auto parity=svand_n_u64_x(pg,qbits,1); auto os=svlsl_n_u64_x(pg,parity,63); p=svreinterpret_f64_u64(sveor_u64_x(pg,svreinterpret_u64_f64(p),os)); svst1_f64(pg,y,p);
+            svst1_u64(pg,jt,ji); auto bits=reinterpret_cast<const uint64_t*>(opt_cos53_coeff_aos); uint64_t lanes=svcntp_b64(pg,pg);
+            for(uint64_t l=0;l<lanes;l++){uint64_t j=jt[l];auto q=bits+2*j;c0b[l]=q[0];c1b[l]=q[1];if(rep && j>=2009)rep[nr++]=base+l;}
+            auto c0=svreinterpret_f64_u64(svld1_u64(pg,c0b)); auto c1=svreinterpret_f64_u64(svld1_u64(pg,c1b)); auto c2=svmul_n_f64_x(pg,c0,MH); auto c3=svmul_n_f64_x(pg,c1,M6); auto p=svmla_f64_x(pg,c2,c3,delta);p=svmla_f64_x(pg,c1,p,delta);p=svmla_f64_x(pg,c0,p,delta);auto par=svand_n_u64_x(pg,qbits,1);auto os=svlsl_n_u64_x(pg,par,63);p=svreinterpret_f64_u64(sveor_u64_x(pg,svreinterpret_u64_f64(p),os));svst1_f64(pg,y,p);
           }
-          extern "C" void raw1(const double*,double*); extern "C" void raw2(const double*,double*); extern "C" void raw3(const double*,double*); extern "C" void raw4(const double*,double*);
-          int main(int argc,char**argv){ alignas(64) double x[8]={0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8},y[8]{}; int k=argc>1?argv[1][0]-'0':0; if(k==1)raw1(x,y); if(k==2)raw2(x,y); if(k==3)raw3(x,y); if(k==4)raw4(x,y); std::printf("PROBE%d_OK %.17g %.17g\n",k,y[0],y[7]); }
+          extern "C" size_t pa(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
+          extern "C" size_t pb(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
+          extern "C" size_t pc(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
+          extern "C" size_t pd(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming;
+          extern "C" size_t pa(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;svbool_t pg=svptrue_b64();for(size_t i=0;i+8<=n;i+=8)body(pg,x+i,y+i,jt,a,b,i,nullptr,nr);return nr;}
+          extern "C" size_t pb(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;for(size_t i=0;i<n;i+=8){svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);body(pg,x+i,y+i,jt,a,b,i,nullptr,nr);}return nr;}
+          extern "C" size_t pc(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;for(size_t i=0;i<n;i+=8){svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);body(pg,x+i,y+i,jt,a,b,i,r,nr);}return nr;}
+          extern "C" size_t pd(const double*x,double*y,size_t n,uint64_t*r) __arm_streaming {alignas(64) uint64_t jt[8],a[8],b[8];size_t nr=0;for(size_t i=0;i<n;i+=8){svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);body(pg,x+i,y+i,jt,a,b,i,r,nr);}return nr;}
+          extern "C" size_t rawa(const double*,double*,size_t,uint64_t*),rawb(const double*,double*,size_t,uint64_t*),rawc(const double*,double*,size_t,uint64_t*),rawd(const double*,double*,size_t,uint64_t*);
+          int main(int argc,char**argv){alignas(64) double x[24],y[24]{};alignas(64) uint64_t r[24]{};for(int i=0;i<24;i++)x[i]=0.05*(i+1);char k=argc>1?argv[1][0]:'?';size_t n=(k=='a'?16:k=='b'?16:k=='c'?13:13),nr=0;if(k=='a')nr=rawa(x,y,n,r);if(k=='b')nr=rawb(x,y,n,r);if(k=='c')nr=rawc(x,y,n,r);if(k=='d')nr=rawd(x,y,n,r);std::printf("PROD_%c_OK n=%zu nr=%zu y0=%.17g ylast=%.17g\n",k,n,nr,y[0],y[n-1]);}
           CPP
           cat >/tmp/wrap.s <<'ASM'
           .text
-          .macro W n
-          .globl _raw\n
+          .macro W s
+          .globl _raw\s
           .p2align 2
-          _raw\n:
+          _raw\s:
             stp x29,x30,[sp,#-16]!
             mov x29,sp
             smstart sm
-            bl _p\n
+            bl _p\s
             smstop sm
             ldp x29,x30,[sp],#16
             ret
           .endm
-          W 1
-          W 2
-          W 3
-          W 4
+          W a
+          W b
+          W c
+          W d
           ASM
           C="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast"
-          clang++ $C -I/tmp/pluto-art -c /tmp/probe.cpp -o /tmp/probe.o
+          clang++ $C -I/tmp/pluto-art -c /tmp/prodprobe.cpp -o /tmp/prodprobe.o
           clang -c -march=armv9.2-a+sme+sme2 /tmp/wrap.s -o /tmp/wrap.o
-          clang++ /tmp/probe.o /tmp/wrap.o -o /tmp/probe
-          clang++ $C -I/tmp/pluto-art -S /tmp/probe.cpp -o /tmp/probe.s
-          sed -n '/_p1:/,/^Lfunc_end0/p' /tmp/probe.s | head -120 || true
-          sed -n '/_p2:/,/^Lfunc_end1/p' /tmp/probe.s | head -180 || true
-          sed -n '/_p3:/,/^Lfunc_end2/p' /tmp/probe.s | head -260 || true
-          sed -n '/_p4:/,/^Lfunc_end3/p' /tmp/probe.s | head -360 || true
-      - name: Execute each stage independently
+          clang++ /tmp/prodprobe.o /tmp/wrap.o -o /tmp/prodprobe
+      - name: Execute production-only pieces independently
         shell: bash
         run: |
           set +e
-          for k in 1 2 3 4; do
-            echo "=== PROBE $k ==="
-            /tmp/probe "$k"
-            rc=$?
-            echo "PROBE_${k}_RC=$rc"
+          for k in a b c d; do
+            echo "=== PROD $k ==="
+            /tmp/prodprobe "$k"
+            echo "PROD_${k}_RC=$?"
           done
           exit 0
