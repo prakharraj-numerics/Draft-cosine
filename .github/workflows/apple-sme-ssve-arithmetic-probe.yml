@@ -13,67 +13,60 @@ jobs:
     runs-on: nscloud-macos-tahoe-arm64-6x14
     steps:
       - uses: actions/checkout@v4
+
       - name: Hardware
         shell: bash
         run: |
           set -euo pipefail
           sysctl -n machdep.cpu.brand_string
-          sysctl -n hw.optional.arm.FEAT_SME
-          sysctl -n hw.optional.arm.FEAT_SME2
-          sysctl -n hw.optional.arm.sme_max_svl_b
+          echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME)"
+          echo "SME2=$(sysctl -n hw.optional.arm.FEAT_SME2)"
+          echo "SME_MAX_SVL_B=$(sysctl -n hw.optional.arm.sme_max_svl_b)"
 
-      - name: Compile corrected streaming arithmetic probe
+      - name: Build raw assembly SME control
         shell: bash
         run: |
           set -euo pipefail
-          cat >/tmp/ssve.cpp <<'CPP'
-          #include <arm_sve.h>
-          #include <cstddef>
-          #include <cstdint>
+          cat >/tmp/ssve_raw.s <<'ASM'
+          .text
+          .globl _ssve_raw
+          .p2align 2
+          _ssve_raw:
+              smstart sm
+              ptrue p0.d
+              ld1d { z0.d }, p0/z, [x0]
+              ld1d { z1.d }, p0/z, [x1]
+              fadd z0.d, p0/m, z0.d, z1.d
+              st1d { z0.d }, p0, [x2]
+              smstop sm
+              ret
+          ASM
 
-          static void ssve_add_stream(const double* a,const double* b,double* c,size_t n) __arm_streaming;
-          static void ssve_add_stream(const double* a,const double* b,double* c,size_t n) __arm_streaming {
-              size_t vl=svcntd();
-              for(size_t i=0;i<n;i+=vl){
-                  svbool_t pg=svwhilelt_b64((uint64_t)i,(uint64_t)n);
-                  svfloat64_t x=svld1_f64(pg,a+i);
-                  svfloat64_t y=svld1_f64(pg,b+i);
-                  svfloat64_t z=svadd_f64_x(pg,x,y);
-                  svst1_f64(pg,c+i,z);
-              }
-          }
-
-          // Normal ARM64 ABI entry. Because the compiler sees the streaming
-          // callee type here, it must perform the streaming-mode transition.
-          extern "C" void ssve_add(const double* a,const double* b,double* c,size_t n) {
-              ssve_add_stream(a,b,c,n);
-          }
-          CPP
-
-          cat >/tmp/main.cpp <<'CPP'
+          cat >/tmp/raw_main.cpp <<'CPP'
           #include <cstdio>
-          #include <cstddef>
-          extern "C" void ssve_add(const double*,const double*,double*,size_t);
+          extern "C" void ssve_raw(const double*,const double*,double*);
           int main(){
-              alignas(64) double a[16],b[16],c[16]{};
-              for(int i=0;i<16;i++){a[i]=i+0.25;b[i]=2*i+0.5;}
-              ssve_add(a,b,c,16);
-              for(int i=0;i<16;i++) if(c[i] != a[i]+b[i]) return 7;
-              std::printf("SSVE_ARITH_OK c0=%.17g c15=%.17g\n",c[0],c[15]);
+              alignas(64) double a[8],b[8],c[8]{};
+              for(int i=0;i<8;i++){a[i]=i+0.25;b[i]=2*i+0.5;}
+              ssve_raw(a,b,c);
+              for(int i=0;i<8;i++) {
+                  if(c[i] != a[i]+b[i]) {
+                      std::printf("BAD lane=%d got=%.17g want=%.17g\n",i,c[i],a[i]+b[i]);
+                      return 7;
+                  }
+              }
+              std::printf("RAW_SSVE_OK c0=%.17g c7=%.17g\n",c[0],c[7]);
               return 0;
           }
           CPP
 
-          clang++ -O2 -std=c++20 -march=armv9.2-a+sme+sme2 -fno-vectorize -fno-slp-vectorize -S /tmp/ssve.cpp -o /tmp/ssve.s
-          echo '--- corrected assembly ---'
-          grep -Ei 'smstart|smstop|whilelo|ld1d|st1d|fadd' /tmp/ssve.s | tee /tmp/asm.txt
-          grep -Eiq 'smstart' /tmp/ssve.s
-          grep -Eiq 'smstop' /tmp/ssve.s
-          clang++ -O2 -std=c++20 -march=armv9.2-a+sme+sme2 -fno-vectorize -fno-slp-vectorize -c /tmp/ssve.cpp -o /tmp/ssve.o
-          clang++ -O2 -std=c++20 -mcpu=native -fno-vectorize -fno-slp-vectorize /tmp/main.cpp /tmp/ssve.o -o /tmp/ssve_probe
+          clang -c -march=armv9.2-a+sme+sme2 /tmp/ssve_raw.s -o /tmp/ssve_raw.o
+          clang++ -O2 -std=c++20 -mcpu=native -fno-vectorize -fno-slp-vectorize /tmp/raw_main.cpp /tmp/ssve_raw.o -o /tmp/ssve_raw_probe
+          echo '--- raw disassembly ---'
+          otool -tvV /tmp/ssve_raw_probe | grep -A12 -B2 -E 'ssve_raw|smstart|ptrue|ld1d|fadd|st1d|smstop' || true
 
-      - name: Execute corrected SSVE arithmetic
+      - name: Execute raw SMSTART plus SSVE arithmetic
         shell: bash
         run: |
           set -euo pipefail
-          /tmp/ssve_probe
+          /tmp/ssve_raw_probe
