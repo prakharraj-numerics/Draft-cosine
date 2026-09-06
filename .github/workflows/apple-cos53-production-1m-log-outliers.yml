@@ -1,4 +1,4 @@
-name: Apple COS53 compiler attack sweep registered
+name: Apple COS53 contract-fast vs p64 baseline vs Apple
 
 on:
   workflow_dispatch:
@@ -9,11 +9,15 @@ on:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-compiler-attack-sweep
+  group: apple-cos53-contract-fast-final
   cancel-in-progress: true
 
 jobs:
-  sweep:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -21,7 +25,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build baseline and compiler challengers
+      - name: Build exact p64 baseline and contract-fast challenger
         shell: bash
         run: |
           set -euo pipefail
@@ -39,7 +43,6 @@ jobs:
           restore_scripts() {
             for f in "${files[@]}"; do cp "/tmp/orig/$(basename "$f")" "$f"; done
           }
-
           prepare_k1280() {
             python3 - <<'PY'
           from pathlib import Path
@@ -52,13 +55,9 @@ jobs:
           p.write_text(s)
           PY
           }
-
-          set_flags() {
-            local mode="$1"
-            MODE="$mode" python3 - <<'PY'
-          import os
+          set_contract_fast() {
+            python3 - <<'PY'
           from pathlib import Path
-          mode=os.environ['MODE']
           paths=[
             'benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh',
             'benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh',
@@ -67,59 +66,48 @@ jobs:
             'benchmark_support/run_apple_cos53_current_p64.sh',
           ]
           for q in paths:
-              p=Path(q); s=p.read_text()
-              if mode=='baseline':
-                  pass
-              elif mode=='contract_fast':
-                  s=s.replace('-ffp-contract=off','-ffp-contract=fast')
-              elif mode=='fast_math':
-                  s=s.replace('-fno-fast-math -ffp-contract=off','-ffast-math -ffp-contract=fast')
-              elif mode=='ofast':
-                  s=s.replace('-O3 -DNDEBUG','-Ofast -DNDEBUG')
-                  s=s.replace('-fno-fast-math -ffp-contract=off','-ffp-contract=fast')
-              else:
-                  raise SystemExit(mode)
-              p.write_text(s)
+              p=Path(q); s=p.read_text().replace('-ffp-contract=off','-ffp-contract=fast'); p.write_text(s)
           PY
           }
-
           build_stack() {
             local label="$1"
             restore_scripts
-            set_flags "$label"
+            if [[ "$label" == attack ]]; then set_contract_fast; fi
             prepare_k1280
             bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
             cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_canonical_frozen_bench
             bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
             cp /tmp/apple_cos53_cpu_eff_bench /tmp/apple_cos53_canonical_optimized_bench
             bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh build
-
             cp /tmp/apple_cos53_canonical_frozen_bench "/tmp/stacks/${label}_frozen"
             cp /tmp/apple_cos53_canonical_optimized_bench "/tmp/stacks/${label}_optimized"
             cp /tmp/apple_cos53_hotloop_bench "/tmp/stacks/${label}_hotloop"
             cp /tmp/apple_cos53_hotloop_apple_specific_bench "/tmp/stacks/${label}_hotapple"
             cp /tmp/apple_cos53_current_p64_bench "/tmp/stacks/${label}_p64"
             cp /tmp/apple_cos53_hotloop_validate "/tmp/stacks/${label}_validate"
-
-            echo "=== validate $label ===" | tee -a /tmp/out/accuracy.txt
-            /tmp/stacks/${label}_validate validate | tee -a /tmp/out/accuracy.txt
           }
-
-          for label in baseline contract_fast fast_math ofast; do
-            build_stack "$label"
-          done
-
+          build_stack baseline
+          build_stack attack
           restore_scripts
           prepare_k1280
 
-      - name: Screen compiler variants vs current p64 baseline and Apple
+      - name: Validate both kernels
+        if: matrix.slot == 1
         shell: bash
         run: |
           set -euo pipefail
-          OUT=/tmp/out/screen.txt
-          : > "$OUT"
-          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 78000 80000 82000 100000 200000 500000 1000000)
+          echo '=== baseline ===' | tee /tmp/out/accuracy.txt
+          /tmp/stacks/baseline_validate validate | tee -a /tmp/out/accuracy.txt
+          echo '=== attack contract_fast ===' | tee -a /tmp/out/accuracy.txt
+          /tmp/stacks/attack_validate validate | tee -a /tmp/out/accuracy.txt
 
+      - name: Benchmark attack vs exact new baseline vs Apple vvcos
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} baseline_sha=9ef125b86cbc996686daab5d3c7ebaa1b629e80d attack=ffp-contract-fast" > "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 78000 80000 82000 100000 200000 500000 1000000)
           activate() {
             local label="$1"
             cp "/tmp/stacks/${label}_frozen" /tmp/apple_cos53_canonical_frozen_bench
@@ -128,23 +116,34 @@ jobs:
             cp "/tmp/stacks/${label}_hotapple" /tmp/apple_cos53_hotloop_apple_specific_bench
             cp "/tmp/stacks/${label}_p64" /tmp/apple_cos53_current_p64_bench
           }
-
-          for r in 1 2; do
+          run_ours() {
+            local label="$1" n="$2"
+            activate "$label"
+            bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh one "$n" \
+              | sed -E "s/stack=[^ ]+/stack=${label}/"
+          }
+          for r in 0 1 2; do
             for n in "${sizes[@]}"; do
-              for label in baseline contract_fast fast_math ofast; do
-                activate "$label"
-                bash benchmark_support/run_apple_cos53_canonical_cpu_v2_robust.sh one "$n" \
-                  | sed -E "s/stack=[^ ]+/stack=${label}/" \
-                  | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              sel=$(( (r + ${{ matrix.slot }}) % 3 ))
+              if (( sel == 0 )); then order=(attack baseline vvcos)
+              elif (( sel == 1 )); then order=(baseline vvcos attack)
+              else order=(vvcos attack baseline)
+              fi
+              for who in "${order[@]}"; do
+                case "$who" in
+                  attack|baseline)
+                    run_ours "$who" "$n" | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT" ;;
+                  vvcos)
+                    /tmp/stacks/baseline_frozen apple "$n" \
+                      | sed 's/stack=apple/stack=vvcos/' \
+                      | sed "s/^/round=$((r+1)) n=$n /" | tee -a "$OUT" ;;
+                esac
               done
-              /tmp/stacks/baseline_frozen apple "$n" \
-                | sed 's/stack=apple/stack=vvcos/' \
-                | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
             done
           done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-compiler-attack-sweep
+          name: apple-cos53-contract-fast-final-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
