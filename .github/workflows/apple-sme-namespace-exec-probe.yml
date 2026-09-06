@@ -1,0 +1,72 @@
+name: Apple Namespace SME execution probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-PLUTO-SME-M4-20260906
+    paths:
+      - .github/workflows/apple-sme-namespace-exec-probe.yml
+
+jobs:
+  probe:
+    runs-on: nscloud-macos-tahoe-arm64-6x14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe streaming-SVE execution
+        shell: bash
+        run: |
+          set -u
+          echo "BRAND=$(sysctl -n machdep.cpu.brand_string)"
+          echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME) SME2=$(sysctl -n hw.optional.arm.FEAT_SME2) SVL=$(sysctl -n hw.optional.arm.sme_max_svl_b)"
+
+          cat >/tmp/smstart.c <<'C'
+          #include <stdio.h>
+          int main(){ __asm__ volatile("smstart sm" ::: "memory"); puts("SMSTART_OK"); __asm__ volatile("smstop sm" ::: "memory"); return 0; }
+          C
+
+          cat >/tmp/ptrue.c <<'C'
+          #include <stdio.h>
+          int main(){ __asm__ volatile("smstart sm\n\tptrue p0.d\n\tsmstop sm" ::: "memory"); puts("PTRUE_OK"); return 0; }
+          C
+
+          cat >/tmp/rdsvl.c <<'C'
+          #include <stdio.h>
+          int main(){ unsigned long n; __asm__ volatile("smstart sm\n\trdsvl %0, #1\n\tsmstop sm" : "=r"(n) :: "memory"); printf("RDSVL_OK bytes=%lu\n",n); return 0; }
+          C
+
+          cat >/tmp/ld1d.c <<'C'
+          #include <stdio.h>
+          #include <stdint.h>
+          int main(){ double a[8]={1,2,3,4,5,6,7,8}, b[8]={0}; __asm__ volatile(
+            "smstart sm\n\t"
+            "ptrue p0.d\n\t"
+            "ld1d {z0.d}, p0/z, [%0]\n\t"
+            "st1d {z0.d}, p0, [%1]\n\t"
+            "smstop sm\n\t" :: "r"(a),"r"(b) : "memory");
+            printf("LD1D_OK %.1f %.1f\n",b[0],b[7]); return 0; }
+          C
+
+          cat >/tmp/fmla.c <<'C'
+          #include <stdio.h>
+          int main(){ double a[8]={1,2,3,4,5,6,7,8}, b[8]={0}; __asm__ volatile(
+            "smstart sm\n\t"
+            "ptrue p0.d\n\t"
+            "ld1d {z0.d}, p0/z, [%0]\n\t"
+            "fmov z1.d, #2.0\n\t"
+            "fmla z0.d, p0/m, z1.d, z1.d\n\t"
+            "st1d {z0.d}, p0, [%1]\n\t"
+            "smstop sm\n\t" :: "r"(a),"r"(b) : "memory");
+            printf("FMLA_OK %.1f %.1f\n",b[0],b[7]); return 0; }
+          C
+
+          for p in smstart ptrue rdsvl ld1d fmla; do
+            echo "--- compile $p ---"
+            clang -O2 -march=armv9.2-a+sme+sme2 /tmp/$p.c -o /tmp/$p || { echo "$p COMPILE_FAIL"; continue; }
+            echo "--- run $p ---"
+            set +e
+            /tmp/$p
+            rc=$?
+            set -e
+            echo "$p rc=$rc"
+          done
