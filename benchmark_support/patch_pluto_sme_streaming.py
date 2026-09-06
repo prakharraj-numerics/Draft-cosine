@@ -4,12 +4,11 @@ p=Path(sys.argv[1])
 s=p.read_text()
 old='''        svuint64_t idx2=svlsl_n_u64_x(pg,jidx,1); svfloat64_t c0=svld1_gather_u64index_f64(pg,opt_cos53_coeff_aos,idx2); svfloat64_t c1=svld1_gather_u64index_f64(pg,opt_cos53_coeff_aos,svadd_n_u64_x(pg,idx2,1));
 '''
-new='''        // AppleClang marks SVE indexed gathers as non-streaming-only.  Keep the
-        // PLUTO K1280 lookup exactly intact by spilling the eight (or future-SVL)
-        // indices, staging coefficient *bits* with scalar integer loads, then
-        // bringing them back into streaming Z registers.  This preserves every
-        // coefficient and every arithmetic operation while exposing the real cost
-        // of PLUTO's indexed LUT under SME.
+new='''        // AppleClang marks SVE indexed gathers as non-streaming-only. Keep the
+        // PLUTO K1280 lookup exactly intact by spilling the streaming indices,
+        // staging coefficient *bits* with scalar integer loads, then bringing
+        // them back into streaming Z registers. The arrays cover streaming
+        // vector lengths through 2048 bits, while current Apple SME is smaller.
         alignas(256) uint64_t ji_tmp[32]{};
         alignas(256) uint64_t c0_bits[32]{};
         alignas(256) uint64_t c1_bits[32]{};
@@ -34,4 +33,11 @@ new='''        for(uint64_t l=0;l<lanes;l++) if(__builtin_expect(ji_tmp[l]>=2009
 assert old in s
 s=s.replace(old,new,1)
 s=s.replace('// SME integration: the same PLUTO arithmetic in SME streaming mode. On M4 Pro\n// the streaming vector length is 512 bits, so this processes 8 binary64 lanes.','// SME integration: the same PLUTO arithmetic in SME streaming mode on any\n// SME-capable Apple Silicon. The loop is vector-length agnostic via svcntd().')
+needle='__arm_locally_streaming static size_t pluto_sme_core'
+assert needle in s
+s=s.replace(needle,'__arm_locally_streaming static uint64_t pluto_sme_svl_bytes(){return svcntb();}\n'+needle,1)
+old='(unsigned long long)(std::string(name)=="sme"?64:0)'
+new='(unsigned long long)(std::string(name)=="sme"?pluto_sme_svl_bytes():0)'
+assert old in s
+s=s.replace(old,new,1)
 p.write_text(s)
