@@ -1,0 +1,2 @@
+PLUTO = DESTINY K1280 hot kernel with the PI_P3 low-part correction removed.
+Single-thread benchmark baseline from 2026-09-06.
