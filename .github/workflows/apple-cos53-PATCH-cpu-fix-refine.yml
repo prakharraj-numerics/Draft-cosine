@@ -1,0 +1,99 @@
+name: Apple COS53 PATCH CPU-fix refined QoS/workgroup sweep
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-PATCH-cpu-fix-20260906
+    paths:
+      - '.github/workflows/apple-cos53-PATCH-cpu-fix-refine.yml'
+
+concurrency:
+  group: apple-cos53-patch-cpu-fix-refine
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen PATCH untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH=5f13c87218873fd9353ef5ab549b8170d8bf3e2a
+          git merge-base --is-ancestor "$PATCH" HEAD
+          git diff --name-only "$PATCH"...HEAD | sort > /tmp/changed.txt
+          printf '%s\n' \
+            '.github/workflows/apple-cos53-PATCH-cpu-fix-sweep.yml' \
+            '.github/workflows/apple-cos53-PATCH-cpu-fix-refine.yml' | sort > /tmp/allowed.txt
+          diff -u /tmp/allowed.txt /tmp/changed.txt
+
+      - name: Build exact PATCH and tuned runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh build
+          bash benchmark_support/run_apple_cos53_cpu_pocket_attack.sh build
+          test -x /tmp/apple_cos53_cpu_pocket_attack
+          test -x /tmp/apple_cos53_fast_hotapple
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Refine tiny single-QoS and WG3 coordination
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          : > "$OUT"
+          sizes=(400 700 1200 3000 40000 78000 79000 81000 100000 200000 500000 1000000)
+          modes=(PATCH APPLE SDEF SUI SUSER SUT T3D0 T3D8 T3U0 T3U8 T3USER0 T3USER8 T3UI0 T3UI8)
+
+          run_mode() {
+            local mode="$1" n="$2"
+            case "$mode" in
+              PATCH) bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh one "$n" ;;
+              APPLE) /tmp/apple_cos53_off_frozen apple "$n" ;;
+              SDEF) bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one single_default "$n" ;;
+              SUI) bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one single_ui "$n" ;;
+              SUSER) bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one single_user "$n" ;;
+              SUT) bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one single_utility "$n" ;;
+              T3D0) /tmp/apple_cos53_cpu_pocket_attack wg3_default_s0 "$n" ;;
+              T3D8) /tmp/apple_cos53_cpu_pocket_attack wg3_default_s8 "$n" ;;
+              T3U0) /tmp/apple_cos53_cpu_pocket_attack wg3_utility_s0 "$n" ;;
+              T3U8) /tmp/apple_cos53_cpu_pocket_attack wg3_utility_s8 "$n" ;;
+              T3USER0) /tmp/apple_cos53_cpu_pocket_attack wg3_user_s0 "$n" ;;
+              T3USER8) /tmp/apple_cos53_cpu_pocket_attack wg3_user_s8 "$n" ;;
+              T3UI0) /tmp/apple_cos53_cpu_pocket_attack wg3_ui_s0 "$n" ;;
+              T3UI8) /tmp/apple_cos53_cpu_pocket_attack wg3_ui_s8 "$n" ;;
+              *) return 2 ;;
+            esac
+          }
+
+          for r in 1 2 3; do
+            for n in "${sizes[@]}"; do
+              shift=$(( (r + ${{ matrix.slot }} + n) % ${#modes[@]} ))
+              for ((k=0; k<${#modes[@]}; ++k)); do
+                idx=$(( (k + shift) % ${#modes[@]} ))
+                who="${modes[$idx]}"
+                run_mode "$who" "$n" \
+                  | sed -E "s/stack=[^ ]+/stack=$who/" \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n mode=$who /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-patch-cpu-fix-refine-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
