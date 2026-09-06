@@ -1,0 +1,145 @@
+name: Apple COS53 Namespace M4 PLUTO-SME vs PLUTO vs vvcos
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-PLUTO-SME-M4-20260906
+    paths:
+      - benchmark_support/make_pluto_sme.py
+      - .github/workflows/apple-cos53-NAMESPACE-PLUTO-SME-vs-PLUTO-vs-vvcos.yml
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2]
+    runs-on: nscloud-macos-tahoe-arm64-6x14
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+      VECLIB_MAXIMUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hardware and SME contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "slot=${{ matrix.slot }}"
+          sysctl -n machdep.cpu.brand_string
+          echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME)"
+          echo "SME2=$(sysctl -n hw.optional.arm.FEAT_SME2)"
+          echo "SME_F64F64=$(sysctl -n hw.optional.arm.FEAT_SME_F64F64)"
+          echo "SME_MAX_SVL_B=$(sysctl -n hw.optional.arm.sme_max_svl_b)"
+          test "$(sysctl -n hw.optional.arm.FEAT_SME)" = 1
+          test "$(sysctl -n hw.optional.arm.FEAT_SME2)" = 1
+          test "$(sysctl -n hw.optional.arm.FEAT_SME_F64F64)" = 1
+
+      - name: Adapt frozen M1-only build guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for p in Path('benchmark_support').glob('*.sh'):
+              s=p.read_text()
+              s=s.replace('[[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]','[[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M"* ]]')
+              p.write_text(s)
+          PY
+
+      - name: Build exact frozen PLUTO and SME translation
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO.sh build
+          test -x /tmp/kernel_attack_no_p3
+          test -f /tmp/kernel_attack_no_p3.cpp
+          python3 benchmark_support/make_pluto_sme.py /tmp/kernel_attack_no_p3.cpp /tmp/pluto_sme.cpp
+
+          MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
+          COMMON="-O3 -DNDEBUG -std=c++20 -mcpu=native -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast"
+          clang++ $COMMON -I/tmp -I/tmp/pthreadpool-install/include \
+            /tmp/pluto_sme.cpp /tmp/pthreadpool-install/lib/libpthreadpool.a \
+            -framework Accelerate -pthread -o /tmp/pluto_sme_bench
+          clang++ $COMMON -DOPT_VALIDATE_MPFR -I/tmp -I/tmp/pthreadpool-install/include \
+            -I"$MP/include" -I"$GP/include" /tmp/pluto_sme.cpp \
+            /tmp/pthreadpool-install/lib/libpthreadpool.a -framework Accelerate -pthread \
+            -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/pluto_sme_validate
+
+          clang++ $COMMON -S -I/tmp -I/tmp/pthreadpool-install/include /tmp/pluto_sme.cpp -o /tmp/pluto_sme.s
+          echo '--- SME assembly markers ---'
+          grep -Ei 'smstart|smstop|ld1d|fmla|whilelo|ptrue' /tmp/pluto_sme.s | head -80 || true
+          grep -Eiq 'smstart|smstop' /tmp/pluto_sme.s
+
+      - name: Accuracy gate <= 2 ULP
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/pluto_sme_validate validate | tee /tmp/accuracy.txt
+          python3 - <<'PY'
+          import re
+          s=open('/tmp/accuracy.txt').read()
+          vals=[int(x) for x in re.findall(r'maxulp=(\d+)',s)]
+          print('SME_MAXULPS',vals)
+          assert len(vals)>=2, vals
+          assert max(vals)<=2, vals
+          PY
+
+      - name: Paired single-thread ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          printf 'slot\tround\tn\tstack\twall_ns_el\tcpu_ns_el\n' >/tmp/raw.tsv
+          one() {
+            local round="$1" n="$2" stack="$3" cmd="$4"
+            local out wall cpu
+            out=$(eval "$cmd")
+            echo "$out"
+            wall=$(echo "$out" | sed -n 's/.*wall_ns_el=\([0-9.]*\).*/\1/p' | tail -1)
+            cpu=$(echo "$out" | sed -n 's/.*cpu_ns_el=\([0-9.]*\).*/\1/p' | tail -1)
+            test -n "$wall"; test -n "$cpu"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' '${{ matrix.slot }}' "$round" "$n" "$stack" "$wall" "$cpu" >>/tmp/raw.tsv
+          }
+          for r in 1 2 3 4 5; do
+            for n in "${sizes[@]}"; do
+              case $(( (r+n) % 3 )) in
+                0)
+                  one "$r" "$n" sme "/tmp/pluto_sme_bench single $n"
+                  one "$r" "$n" pluto "/tmp/kernel_attack_no_p3 single $n"
+                  one "$r" "$n" apple "env VECLIB_MAXIMUM_THREADS=1 /tmp/pluto_sme_bench apple $n"
+                  ;;
+                1)
+                  one "$r" "$n" apple "env VECLIB_MAXIMUM_THREADS=1 /tmp/pluto_sme_bench apple $n"
+                  one "$r" "$n" sme "/tmp/pluto_sme_bench single $n"
+                  one "$r" "$n" pluto "/tmp/kernel_attack_no_p3 single $n"
+                  ;;
+                2)
+                  one "$r" "$n" pluto "/tmp/kernel_attack_no_p3 single $n"
+                  one "$r" "$n" apple "env VECLIB_MAXIMUM_THREADS=1 /tmp/pluto_sme_bench apple $n"
+                  one "$r" "$n" sme "/tmp/pluto_sme_bench single $n"
+                  ;;
+              esac
+            done
+          done
+          python3 - <<'PY'
+          import csv,statistics
+          rows=list(csv.DictReader(open('/tmp/raw.tsv'),delimiter='\t'))
+          print('N\tSME_WALL\tPLUTO_WALL\tAPPLE_WALL\tPLUTO/SME\tAPPLE/SME\tSME_CPU\tPLUTO_CPU\tAPPLE_CPU')
+          for n in sorted({int(r['n']) for r in rows}):
+              d={}
+              for st in ('sme','pluto','apple'):
+                  q=[r for r in rows if int(r['n'])==n and r['stack']==st]
+                  d[st]=(statistics.median(float(r['wall_ns_el']) for r in q),statistics.median(float(r['cpu_ns_el']) for r in q))
+              print(f"{n}\t{d['sme'][0]:.9f}\t{d['pluto'][0]:.9f}\t{d['apple'][0]:.9f}\t{d['pluto'][0]/d['sme'][0]:.6f}\t{d['apple'][0]/d['sme'][0]:.6f}\t{d['sme'][1]:.9f}\t{d['pluto'][1]:.9f}\t{d['apple'][1]:.9f}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-sme-m4-slot-${{ matrix.slot }}
+          path: |
+            /tmp/raw.tsv
+            /tmp/accuracy.txt
+            /tmp/pluto_sme.s
