@@ -1,0 +1,76 @@
+name: Apple COS53 p-confirm 50K-100K
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-p-sweep-40-100k-20260906
+    paths:
+      - '.github/workflows/apple-cos53-p-confirm-50-100k.yml'
+
+concurrency:
+  group: apple-cos53-p-confirm-50-100k
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact current baseline and p challenger
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+          cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_canonical_frozen_bench
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+          cp /tmp/apple_cos53_cpu_eff_bench /tmp/apple_cos53_canonical_optimized_bench
+          bash benchmark_support/run_apple_cos53_apple_specific_eff.sh build
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh build
+          bash benchmark_support/run_apple_cos53_p_sweep_40_100k.sh build
+
+      - name: Confirm top candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} baseline_sha=70eea3cc4395d2643e9e4fea3824fee18d755c4f" > "$OUT"
+          for r in 1 2 3 4 5; do
+            for n in 50000 80000 100000; do
+              bash benchmark_support/run_apple_cos53_p_sweep_40_100k.sh baseline "$n" | sed -E 's/stack=[^ ]+/stack=baseline/' | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              case "$n" in
+                50000) ps=(12 24 32) ;;
+                80000) ps=(24 28 40 64) ;;
+                100000) ps=(16 32 40 48 64) ;;
+              esac
+              for p in "${ps[@]}"; do
+                bash benchmark_support/run_apple_cos53_p_sweep_40_100k.sh p "$p" "$n" | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+              done
+              bash benchmark_support/run_apple_cos53_p_sweep_40_100k.sh apple "$n" | sed -E 's/stack=[^ ]+/stack=vvcos/' | sed "s/^/round=$r n=$n /" | tee -a "$OUT"
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-p-confirm-50-100k-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
