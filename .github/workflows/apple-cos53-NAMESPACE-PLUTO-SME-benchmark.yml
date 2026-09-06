@@ -50,16 +50,24 @@ jobs:
           python3 benchmark_support/patch_pluto_sme_abcde_diag.py /tmp/pluto_diag.cpp
           cat >/tmp/pluto_sme_entry.s <<'ASM'
           .text
-          .globl _pluto_sme_eval_raw
+          .macro SMWRAP raw, stream
+          .globl \raw
           .p2align 2
-          _pluto_sme_eval_raw:
+          \raw:
               stp x29, x30, [sp, #-16]!
               mov x29, sp
               smstart sm
-              bl _pluto_sme_stream
+              bl \stream
               smstop sm
               ldp x29, x30, [sp], #16
               ret
+          .endm
+          SMWRAP _pluto_sme_eval_raw, _pluto_sme_stream
+          SMWRAP _pluto_diag_B_raw, _pluto_diag_B_stream
+          SMWRAP _pluto_diag_C_raw, _pluto_diag_C_stream
+          SMWRAP _pluto_diag_D_raw, _pluto_diag_D_stream
+          SMWRAP _pluto_diag_E64_raw, _pluto_diag_E64_stream
+          SMWRAP _pluto_diag_E128_raw, _pluto_diag_E128_stream
           ASM
           COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
           clang++ $COMMON -I/tmp/pluto-art -c /tmp/pluto_diag.cpp -o /tmp/pluto_diag.o
