@@ -1,0 +1,67 @@
+name: Apple COS53 Namespace hardware SME probe
+
+on:
+  push:
+    branches:
+      - exp/apple-cos53-PLUTO-SME-M4-20260906
+    paths:
+      - .github/workflows/apple-cos53-NAMESPACE-hardware-sme-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: nscloud-macos-tahoe-arm64-6x14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hardware and toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          uname -m
+          sysctl -n machdep.cpu.brand_string || true
+          sysctl -n hw.ncpu || true
+          sysctl -n hw.memsize || true
+          xcodebuild -version || true
+          xcrun clang --version || true
+          echo '--- SME-related sysctls ---'
+          sysctl -a 2>/dev/null | grep -Ei 'SME|SVE' || true
+
+      - name: Compile and execute SME streaming probe
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat >/tmp/sme_probe.c <<'EOF'
+          #include <stdint.h>
+          #include <stdio.h>
+          int main(void) {
+          #if defined(__aarch64__)
+            uint64_t before=0, during=0, after=0;
+            __asm__ volatile("mrs %0, svcr" : "=r"(before));
+            __asm__ volatile("smstart sm" ::: "memory");
+            __asm__ volatile("mrs %0, svcr" : "=r"(during));
+            __asm__ volatile("smstop sm" ::: "memory");
+            __asm__ volatile("mrs %0, svcr" : "=r"(after));
+            printf("SME_STREAMING_OK before=0x%llx during=0x%llx after=0x%llx\n",
+              (unsigned long long)before,
+              (unsigned long long)during,
+              (unsigned long long)after);
+            return 0;
+          #else
+            return 77;
+          #endif
+          }
+          EOF
+          xcrun clang -O3 -Wall -Wextra -march=armv9.2-a+sme+sme2 /tmp/sme_probe.c -o /tmp/sme_probe
+          /tmp/sme_probe
+
+      - name: Compiler SME feature macros
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo | xcrun clang -dM -E -x c - -march=armv9.2-a+sme+sme2 | grep -E '__ARM_FEATURE_(SME|SVE)' | sort || true
