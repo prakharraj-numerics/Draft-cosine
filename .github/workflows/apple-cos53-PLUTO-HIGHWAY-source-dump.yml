@@ -10,13 +10,20 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Prove frozen PLUTO untouched
         shell: bash
         run: |
-          test "$(git rev-parse freeze/apple-cos53-PLUTO-20260906)" = d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+          set -euo pipefail
+          PLUTO=d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+          git fetch origin freeze/apple-cos53-PLUTO-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$PLUTO"
+          git merge-base --is-ancestor "$PLUTO" HEAD
       - name: Build exact PLUTO
         shell: bash
         run: |
+          set -euo pipefail
           bash benchmark_support/run_apple_cos53_PLUTO.sh build
           test -f /tmp/kernel_attack_no_p3.cpp
           cp /tmp/kernel_attack_no_p3.cpp ./pluto_no_p3_exact.cpp
@@ -27,3 +34,4 @@ jobs:
           path: |
             pluto_no_p3_exact.cpp
             pluto_coeff_aos_exact.h
+          if-no-files-found: error
