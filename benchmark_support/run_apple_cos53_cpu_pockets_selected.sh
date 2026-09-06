@@ -18,7 +18,7 @@ if [[ "$MODE" == route ]]; then
   case "$2" in
     78000) echo old_wg3_utility ;;
     80000) echo wg2_utility_s8 ;;
-    82000) echo old_wg2_default ;;
+    82000) echo frozen_baseline ;;
     100000) echo native_pool3_off ;;
     200000) echo old_wg3_utility ;;
     500000) echo frozen_baseline ;;
@@ -38,8 +38,7 @@ if [[ "$MODE" == one ]]; then
     80000)
       exec /tmp/apple_cos53_cpu_pocket_attack wg2_utility_s8 "$n" ;;
     82000)
-      bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate fast
-      exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one wg2_default "$n" ;;
+      exec bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh one "$n" ;;
     100000)
       bash benchmark_support/run_apple_cos53_contract_fast_baseline.sh activate off
       exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh one pool3 "$n" ;;
