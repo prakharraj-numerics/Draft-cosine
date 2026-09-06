@@ -1,4 +1,4 @@
-name: Apple COS53 Namespace PLUTO fast SME SSVE
+name: Apple COS53 Namespace PLUTO SME A-E diagnostic
 on:
   workflow_dispatch:
   push:
@@ -6,12 +6,13 @@ on:
     paths:
       - benchmark_support/apple_cos53_pluto_sme_m4.cpp
       - benchmark_support/patch_pluto_sme_streaming.py
+      - benchmark_support/patch_pluto_sme_abcde_diag.py
       - .github/workflows/apple-cos53-NAMESPACE-PLUTO-SME-benchmark.yml
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: pluto-sme-fast-single-run
+  group: pluto-sme-abcde-single-run
   cancel-in-progress: true
 jobs:
   bench:
@@ -23,21 +24,16 @@ jobs:
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Hardware and SME streaming contract
+      - name: Hardware contract
         shell: bash
         run: |
           set -euo pipefail
-          brand="$(sysctl -n machdep.cpu.brand_string)"
-          sme="$(sysctl -n hw.optional.arm.FEAT_SME)"
-          sme2="$(sysctl -n hw.optional.arm.FEAT_SME2)"
-          svl="$(sysctl -n hw.optional.arm.sme_max_svl_b)"
-          echo "chip=$brand" | tee /tmp/hardware.txt
-          echo "SME=$sme SME2=$sme2 max_svl_bytes=$svl" | tee -a /tmp/hardware.txt
-          test "$sme" = 1; test "$sme2" = 1; test "$svl" = 64
+          echo "chip=$(sysctl -n machdep.cpu.brand_string)" | tee /tmp/hardware.txt
+          echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME) SME2=$(sysctl -n hw.optional.arm.FEAT_SME2) max_svl_bytes=$(sysctl -n hw.optional.arm.sme_max_svl_b)" | tee -a /tmp/hardware.txt
+          test "$(sysctl -n hw.optional.arm.FEAT_SME)" = 1
+          test "$(sysctl -n hw.optional.arm.sme_max_svl_b)" = 64
           clang++ --version | head -1 | tee -a /tmp/hardware.txt
-
-      - name: Fetch exact frozen PLUTO coefficient table
+      - name: Fetch frozen PLUTO coefficients
         uses: actions/download-artifact@v4
         with:
           name: pluto-m4-generated-source
@@ -45,14 +41,13 @@ jobs:
           github-token: ${{ github.token }}
           repository: prakharraj-numerics/Draft-cosine
           run-id: 34051479551
-
-      - name: Build fast SME streaming benchmark
+      - name: Build A-E diagnostic
         shell: bash
         run: |
           set -euo pipefail
-          test -f /tmp/pluto-art/apple_cos53_coeff_aos.h
-          cp benchmark_support/apple_cos53_pluto_sme_m4.cpp /tmp/pluto_sme_candidate.cpp
-          python3 benchmark_support/patch_pluto_sme_streaming.py /tmp/pluto_sme_candidate.cpp
+          cp benchmark_support/apple_cos53_pluto_sme_m4.cpp /tmp/pluto_diag.cpp
+          python3 benchmark_support/patch_pluto_sme_streaming.py /tmp/pluto_diag.cpp
+          python3 benchmark_support/patch_pluto_sme_abcde_diag.py /tmp/pluto_diag.cpp
           cat >/tmp/pluto_sme_entry.s <<'ASM'
           .text
           .globl _pluto_sme_eval_raw
@@ -67,74 +62,72 @@ jobs:
               ret
           ASM
           COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
-          clang++ $COMMON -I/tmp/pluto-art -c /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_candidate.o
-          clang++ $COMMON -I/tmp/pluto-art -S /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_candidate.s
-          ! grep -q 'pthreadpool' /tmp/pluto_sme_candidate.cpp
-          grep -q 'pluto_sme_stream' /tmp/pluto_sme_candidate.s
-          ! grep -Ein 'ld1.*gather' /tmp/pluto_sme_candidate.s
-          grep -Ein '\bfmla\b|\bfmad\b' /tmp/pluto_sme_candidate.s | head -20 | tee /tmp/vector-fma-proof.txt
-          test -s /tmp/vector-fma-proof.txt
+          clang++ $COMMON -I/tmp/pluto-art -c /tmp/pluto_diag.cpp -o /tmp/pluto_diag.o
           clang -c -march=armv9.2-a+sme+sme2 /tmp/pluto_sme_entry.s -o /tmp/pluto_sme_entry.o
-          clang++ /tmp/pluto_sme_candidate.o /tmp/pluto_sme_entry.o -framework Accelerate -pthread -o /tmp/pluto_sme_bench
-
-      - name: Build accuracy validator
+          clang++ /tmp/pluto_diag.o /tmp/pluto_sme_entry.o -framework Accelerate -pthread -o /tmp/pluto_diag
+          clang++ $COMMON -I/tmp/pluto-art -S /tmp/pluto_diag.cpp -o /tmp/pluto_diag.s
+          grep -Ein '\bfmla\b|\bfmad\b' /tmp/pluto_diag.s | head -30 | tee /tmp/fma-proof.txt
+          test -s /tmp/fma-proof.txt
+      - name: Build and run accuracy gate for A E64 E128
         shell: bash
         run: |
           set -euo pipefail
           brew list mpfr >/dev/null 2>&1 || brew install mpfr
           MP="$(brew --prefix mpfr)"; GP="$(brew --prefix gmp)"
           COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
-          clang++ $COMMON -DOPT_VALIDATE_MPFR -I/tmp/pluto-art -I"$MP/include" -I"$GP/include" -c /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_validate.o
-          clang++ /tmp/pluto_sme_validate.o /tmp/pluto_sme_entry.o -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/pluto_sme_validate
-
-      - name: Accuracy gate <=2 ULP
-        shell: bash
-        run: |
-          set -euo pipefail
-          /tmp/pluto_sme_validate validate | tee /tmp/accuracy.txt
+          clang++ $COMMON -DOPT_VALIDATE_MPFR -I/tmp/pluto-art -I"$MP/include" -I"$GP/include" -c /tmp/pluto_diag.cpp -o /tmp/pluto_validate.o
+          clang++ /tmp/pluto_validate.o /tmp/pluto_sme_entry.o -framework Accelerate -pthread -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/pluto_validate
+          /tmp/pluto_validate validate | tee /tmp/accuracy.txt
           python3 - <<'PY'
           import re
           s=open('/tmp/accuracy.txt').read()
           rows=re.findall(r'PLUTO_SME_ACCURACY stack=(\w+) tag=(\S+).*?maxulp=(\d+)',s)
           print('ACCURACY_ROWS',rows)
           assert rows and all(int(u)<=2 for _,_,u in rows), rows
-          assert any(st=='sme' and tag=='9600' for st,tag,_ in rows)
-          assert any(st=='sme' and tag=='1m_stress' for st,tag,_ in rows)
+          for st in ('sme','E64','E128'):
+              assert any(a==st and tag=='9600' for a,tag,_ in rows), (st,rows)
+              assert any(a==st and tag=='1m_stress' for a,tag,_ in rows), (st,rows)
           PY
-
-      - name: Paired full ladder
+      - name: A-E one-shot diagnostic benchmark
         shell: bash
         run: |
           set -euo pipefail
-          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
-          : > /tmp/raw.txt
-          for round in 1 2 3 4 5; do
+          sizes=(100 3000 30000 80000 200000 1000000)
+          modes=(A B C D E64 E128 neon apple)
+          : >/tmp/raw.txt
+          for round in 1 2 3; do
             for n in "${sizes[@]}"; do
-              case $(( (round+n) % 3 )) in 0) order=(sme neon apple);; 1) order=(apple sme neon);; 2) order=(neon apple sme);; esac
-              for stack in "${order[@]}"; do env VECLIB_MAXIMUM_THREADS=1 /tmp/pluto_sme_bench "$stack" "$n" | tee -a /tmp/raw.txt; done
+              shift=$(( (round+n) % ${#modes[@]} ))
+              for ((k=0;k<${#modes[@]};k++)); do
+                m=${modes[$(((k+shift)%${#modes[@]}))]}
+                /tmp/pluto_diag "$m" "$n" | tee -a /tmp/raw.txt
+              done
             done
           done
           python3 - <<'PY' | tee /tmp/summary.tsv
           import re,statistics
           rows={}
           for line in open('/tmp/raw.txt'):
-            m=re.search(r'stack=(\w+) n=(\d+) wall_ns_el=([0-9.]+) cpu_ns_el=([0-9.]+)',line)
-            if m: rows.setdefault((int(m.group(2)),m.group(1)),[]).append((float(m.group(3)),float(m.group(4))))
-          print('n\tsme_wall\tneon_wall\tapple_wall\tneon_over_sme\tapple_over_sme')
+              m=re.search(r'stack=(\w+) n=(\d+) wall_ns_el=([0-9.]+)',line)
+              if m: rows.setdefault((int(m.group(2)),m.group(1)),[]).append(float(m.group(3)))
+          modes=('A','B','C','D','E64','E128','neon','apple')
+          print('n\t'+'\t'.join(modes))
           for n in sorted({k[0] for k in rows}):
-            med={st:statistics.median(x[0] for x in rows[(n,st)]) for st in ('sme','neon','apple')}
-            print(f'{n}\t{med["sme"]:.9f}\t{med["neon"]:.9f}\t{med["apple"]:.9f}\t{med["neon"]/med["sme"]:.6f}\t{med["apple"]/med["sme"]:.6f}')
+              med={m:statistics.median(rows[(n,m)]) for m in modes}
+              print(str(n)+'\t'+'\t'.join(f'{med[m]:.9f}' for m in modes))
+          print('\nINTERPRETATION_RATIOS')
+          for n in sorted({k[0] for k in rows}):
+              med={m:statistics.median(rows[(n,m)]) for m in modes}
+              print(f'n={n} A={med["A"]:.3f} B={med["B"]:.3f} C={med["C"]:.3f} D={med["D"]:.3f} E64={med["E64"]:.3f} E128={med["E128"]:.3f} apple={med["apple"]:.3f} A_over_C={med["A"]/med["C"]:.2f} D_over_C={med["D"]/med["C"]:.2f}')
           PY
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pluto-fast-sme-ssve-results
+          name: pluto-sme-abcde-diagnostic
           path: |
             /tmp/hardware.txt
             /tmp/accuracy.txt
             /tmp/raw.txt
             /tmp/summary.tsv
-            /tmp/vector-fma-proof.txt
-            /tmp/pluto_sme_candidate.s
-            /tmp/pluto_sme_entry.s
+            /tmp/fma-proof.txt
+            /tmp/pluto_diag.s
