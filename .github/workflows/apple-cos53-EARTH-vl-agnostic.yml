@@ -1,0 +1,89 @@
+name: Apple COS53 EARTH VL agnostic
+on:
+  workflow_dispatch:
+  push:
+    branches: [exp/apple-cos53-PLUTO-SME-M4-20260906]
+    paths:
+      - benchmark_support/apple_cos53_earth_vl_agnostic.cpp
+      - .github/workflows/apple-cos53-EARTH-vl-agnostic.yml
+jobs:
+  bench:
+    runs-on: nscloud-macos-tahoe-arm64-6x14
+    timeout-minutes: 15
+    env:
+      VECLIB_MAXIMUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hardware contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "chip=$(sysctl -n machdep.cpu.brand_string)" | tee /tmp/hardware.txt
+          echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME) SME2=$(sysctl -n hw.optional.arm.FEAT_SME2) max_svl_bytes=$(sysctl -n hw.optional.arm.sme_max_svl_b)" | tee -a /tmp/hardware.txt
+          test "$(sysctl -n hw.optional.arm.FEAT_SME)" = 1
+      - name: Build frozen and VL-agnostic EARTH
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/entry.s <<'ASM'
+          .text
+          .macro SMWRAP raw, stream
+          .globl \raw
+          .p2align 2
+          \raw:
+              stp x29, x30, [sp, #-16]!
+              mov x29, sp
+              smstart sm
+              bl \stream
+              smstop sm
+              ldp x29, x30, [sp], #16
+              ret
+          .endm
+          SMWRAP _earth_raw, _earth_stream
+          SMWRAP _earth_vl_raw, _earth_vl_stream
+          ASM
+          cat >/tmp/bench.cpp <<'CPP'
+          #include <Accelerate/Accelerate.h>
+          #include <mach/mach_time.h>
+          #include <algorithm>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <vector>
+          static volatile double sink=0.0;
+          extern "C" void earth_raw(const double*,double*,size_t,const double*,const double*,const double*,const uint64_t*);
+          extern "C" void earth_vl_raw(const double*,double*,size_t,const double*,const double*,const double*,const uint64_t*);
+          static uint64_t mix64(uint64_t x){x^=x>>30;x*=UINT64_C(0xbf58476d1ce4e5b9);x^=x>>27;x*=UINT64_C(0x94d049bb133111eb);x^=x>>31;return x;}
+          static double unit52(uint64_t h){return ((double)(h>>12)+0.5)*0x1p-52;}
+          static double ns(uint64_t t){static mach_timebase_info_data_t tb=[](){mach_timebase_info_data_t x{};mach_timebase_info(&x);return x;}();return (double)t*tb.numer/tb.denom;}
+          struct P{std::vector<double>x,d,c0,c1,y;std::vector<uint64_t>q;};
+          static P prep(size_t n){P z;z.x.resize(n);z.d.resize(n);z.c0.resize(n);z.c1.resize(n);z.q.resize(n);z.y.resize(n);for(size_t i=0;i<n;i++){double u=unit52(mix64(2026090711ULL+i*0x9e3779b97f4a7c15ULL));z.x[i]=10000*u-5000;z.d[i]=(unit52(mix64(i+11))-0.5)*0x1p-10;double a=unit52(mix64(i+23))*1.57;z.c0[i]=cos(a);z.c1[i]=-sin(a);double qm=fabs(z.x[i])*0x1.45f306dc9c883p-2+0x1p52;memcpy(&z.q[i],&qm,8);}return z;}
+          static void frozen(P&z){earth_raw(z.x.data(),z.y.data(),z.x.size(),z.d.data(),z.c0.data(),z.c1.data(),z.q.data());}
+          static void vl(P&z){earth_vl_raw(z.x.data(),z.y.data(),z.x.size(),z.d.data(),z.c0.data(),z.c1.data(),z.q.data());}
+          static void apple(P&z){int n=(int)z.x.size();vvcos(z.y.data(),z.x.data(),&n);}
+          using F=void(*)(P&);
+          static double bench(F f,P&z){for(int i=0;i<20;i++)f(z);size_t r=std::max<size_t>(2,4000000/z.x.size());auto t0=mach_absolute_time();for(size_t i=0;i<r;i++)f(z);auto t1=mach_absolute_time();sink+=z.y[z.x.size()/3];return ns(t1-t0)/(r*z.x.size());}
+          int main(){size_t sizes[]={100,400,700,1200,3000,15000,30000,80000,200000,500000,1000000};for(auto n:sizes){P a=prep(n),b=a,z=a;frozen(a);vl(b);if(memcmp(a.y.data(),b.y.data(),n*8)){fprintf(stderr,"EARTH_VL_EQ_FAIL n=%zu\n",n);return 4;}double ef[5],ev[5],ap[5];for(int r=0;r<5;r++){ef[r]=bench(frozen,z);ev[r]=bench(vl,z);ap[r]=bench(apple,z);}std::sort(ef,ef+5);std::sort(ev,ev+5);std::sort(ap,ap+5);printf("EARTH_VL_RESULT n=%zu frozen=%.9f vl=%.9f apple=%.9f vl_vs_frozen=%.6f apple_over_vl=%.6f\n",n,ef[2],ev[2],ap[2],ef[2]/ev[2],ap[2]/ev[2]);}return sink==123456.0;}
+          CPP
+          COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
+          clang++ $COMMON -c benchmark_support/apple_cos53_earth_frozen.cpp -o /tmp/frozen.o
+          clang++ $COMMON -c benchmark_support/apple_cos53_earth_vl_agnostic.cpp -o /tmp/vl.o
+          clang -c -march=armv9.2-a+sme+sme2 /tmp/entry.s -o /tmp/entry.o
+          clang++ -O3 -DNDEBUG -std=c++20 /tmp/bench.cpp /tmp/frozen.o /tmp/vl.o /tmp/entry.o -framework Accelerate -o /tmp/bench
+          clang++ $COMMON -S benchmark_support/apple_cos53_earth_vl_agnostic.cpp -o /tmp/vl.s
+          grep -Ein '\bincd\b|\bcntd\b|\bwhilelo\b|\bwhilelt\b|\bfmla\b|\bfmad\b' /tmp/vl.s | head -80 | tee /tmp/asm-proof.txt
+      - name: Benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/bench | tee /tmp/results.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: earth-vl-agnostic-results
+          path: |
+            /tmp/hardware.txt
+            /tmp/results.txt
+            /tmp/asm-proof.txt
+            /tmp/vl.s
