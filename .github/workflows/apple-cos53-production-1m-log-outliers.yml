@@ -1,4 +1,4 @@
-name: Apple COS53 Instruments probe
+name: Apple COS53 Instruments live probe
 
 on:
   workflow_dispatch:
@@ -28,35 +28,35 @@ jobs:
           git merge-base --is-ancestor "$REST" HEAD
           changed="$(git diff --name-only "$REST" HEAD | sort)"
           test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
-      - name: Probe Instruments and counters with deadlines
+      - name: Record live CPU Counters and Time Profiler probes
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p /tmp/out
-          python3 - <<'PY' | tee /tmp/out/probe.txt
-          import subprocess
-          cmds=[
-            ('uname',['uname','-a'],10),
-            ('cpu',['sysctl','-n','machdep.cpu.brand_string'],10),
-            ('xcode',['xcodebuild','-version'],15),
-            ('xctrace-version',['xcrun','xctrace','version'],15),
-            ('templates',['xcrun','xctrace','list','templates'],30),
-            ('record-help',['xcrun','xctrace','record','--help'],15),
-            ('export-help',['xcrun','xctrace','export','--help'],15),
-          ]
-          for name,cmd,to in cmds:
-              print(f'=== {name} ===', flush=True)
-              try:
-                  p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=to)
-                  print(p.stdout, end='')
-                  print('RC',p.returncode)
-              except subprocess.TimeoutExpired as e:
-                  out=e.stdout.decode() if isinstance(e.stdout,bytes) else (e.stdout or '')
-                  print(out,end='')
-                  print('TIMEOUT',to)
+          run_one() {
+            template="$1"; tag="$2"
+            echo "=== RECORD $template ===" | tee -a /tmp/out/live.txt
+            python3 - "$template" "$tag" <<'PY' 2>&1 | tee -a /tmp/out/live.txt
+          import subprocess,sys,os
+          template,tag=sys.argv[1:]
+          out=f'/tmp/out/{tag}.trace'
+          cmd=['xcrun','xctrace','record','--template',template,'--time-limit','2s','--output',out,'--target-stdout','/dev/null','--no-prompt','--launch','--','/usr/bin/yes']
+          try:
+              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=20)
+              print(p.stdout,end=''); print('RC',p.returncode,'TRACE_EXISTS',os.path.exists(out))
+          except subprocess.TimeoutExpired as e:
+              print('TIMEOUT',e.stdout or '')
           PY
+            if [[ -d "/tmp/out/${tag}.trace" ]]; then
+              xcrun xctrace export --input "/tmp/out/${tag}.trace" --toc --output "/tmp/out/${tag}-toc.xml" 2>>/tmp/out/live.txt || true
+              echo "=== TOC $tag ===" >> /tmp/out/live.txt
+              sed -n '1,240p' "/tmp/out/${tag}-toc.xml" >> /tmp/out/live.txt 2>/dev/null || true
+            fi
+          }
+          run_one 'CPU Counters' counters
+          run_one 'Time Profiler' time
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-instruments-probe
+          name: apple-cos53-instruments-live-probe
           path: /tmp/out
           if-no-files-found: error
