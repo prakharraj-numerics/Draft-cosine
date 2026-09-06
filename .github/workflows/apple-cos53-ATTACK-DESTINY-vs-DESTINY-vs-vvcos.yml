@@ -50,18 +50,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          declare -A expected=(
-            [100]=single [400]=wg2_utility [700]=wg2_ui [1200]=wg2_ui
-            [3000]=wg3_default [15000]=pool2_clean [29999]=pool2_clean
-            [30000]=wg2_ui [40000]=wg3_user [40001]=wg2_ui [75000]=wg2_ui
-            [78000]=wg3_utility [79000]=wg3_default [80000]=wg2_utility
-            [81000]=wg3_default [82000]=wg2_default [100000]=wg3_default
-            [200000]=wg3_utility [500000]=wg3_default [1000000]=wg3_default
-          )
-          for n in "${!expected[@]}"; do
+          check_route() {
+            n="$1"; expected="$2"
             got="$(bash benchmark_support/run_apple_cos53_ATTACK_DESTINY.sh route "$n")"
-            [[ "$got" == "${expected[$n]}" ]]
-          done
+            [[ "$got" == "$expected" ]]
+          }
+          check_route 100 single
+          check_route 400 wg2_utility
+          check_route 700 wg2_ui
+          check_route 1200 wg2_ui
+          check_route 3000 wg3_default
+          check_route 15000 pool2_clean
+          check_route 29999 pool2_clean
+          check_route 30000 wg2_ui
+          check_route 40000 wg3_user
+          check_route 40001 wg2_ui
+          check_route 75000 wg2_ui
+          check_route 78000 wg3_utility
+          check_route 79000 wg3_default
+          check_route 80000 wg2_utility
+          check_route 81000 wg3_default
+          check_route 82000 wg2_default
+          check_route 100000 wg3_default
+          check_route 200000 wg3_utility
+          check_route 500000 wg3_default
+          check_route 1000000 wg3_default
 
       - name: Validate unchanged math
         if: matrix.slot == 1
