@@ -10,7 +10,7 @@ on:
 
 jobs:
   probe:
-    runs-on: getmac-tahoe
+    runs-on: getmac
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -58,4 +58,4 @@ jobs:
           set -euxo pipefail
           echo | xcrun clang -dM -E -x c - -march=armv9.2-a+sme+sme2 | grep -E '__ARM_FEATURE_(SME|SVE)' | sort || true
 
-# retriggered after GetMac GitHub App connection on 2026-09-06
+# retriggered after GetMac GitHub App connection; canonical getmac label
