@@ -1,0 +1,44 @@
+name: Apple COS53 Namespace PLUTO source capture
+on:
+  workflow_dispatch:
+  push:
+    branches: [exp/apple-cos53-PLUTO-SME-M4-20260906]
+    paths: [.github/workflows/apple-cos53-NAMESPACE-PLUTO-source-capture.yml]
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: nscloud-macos-tahoe-arm64-6x14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Adapt frozen M1 build guards to this Apple Silicon host
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for p in Path('benchmark_support').glob('*.sh'):
+              s=p.read_text()
+              s=s.replace('[[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M1"* ]]','[[ "$(sysctl -n machdep.cpu.brand_string)" == *"Apple M"* ]]')
+              p.write_text(s)
+          PY
+      - name: Build exact PLUTO no-P3 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO.sh build
+          test -f /tmp/kernel_attack_no_p3.cpp
+          test -x /tmp/kernel_attack_no_p3
+          cp /tmp/kernel_attack_no_p3.cpp /tmp/pluto_no_p3_exact.cpp
+          echo '--- OPT_PAIR ---'
+          grep -n -A120 -B20 'opt_pair' /tmp/pluto_no_p3_exact.cpp | head -220
+          echo '--- EVAL ---'
+          grep -n -A80 -B10 'opt_cos53_eval' /tmp/pluto_no_p3_exact.cpp | head -160
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-m4-generated-source
+          path: |
+            /tmp/pluto_no_p3_exact.cpp
+            /tmp/apple_cos53_coeff_aos.h
+          if-no-files-found: error
