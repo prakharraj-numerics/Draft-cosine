@@ -1,0 +1,111 @@
+name: Apple COS53 ATTACK DESTINY vs DESTINY vs vvcos
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-ATTACK-DESTINY-20260906
+    paths:
+      - 'benchmark_support/run_apple_cos53_ATTACK_DESTINY.sh'
+      - '.github/workflows/apple-cos53-ATTACK-DESTINY-vs-DESTINY-vs-vvcos.yml'
+
+concurrency:
+  group: apple-cos53-attack-destiny
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove frozen DESTINY untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESTINY=f3288a1faf54d7b352bd564ae8760ddb35ce1892
+          git merge-base --is-ancestor "$DESTINY" HEAD
+          git diff --name-only "$DESTINY"...HEAD | sort > /tmp/changed.txt
+          printf '%s\n' \
+            '.github/workflows/apple-cos53-ATTACK-DESTINY-vs-DESTINY-vs-vvcos.yml' \
+            'benchmark_support/run_apple_cos53_ATTACK_DESTINY.sh' | sort > /tmp/allowed.txt
+          diff -u /tmp/allowed.txt /tmp/changed.txt
+
+      - name: Build exact DESTINY plus ATTACK DESTINY
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_ATTACK_DESTINY.sh build
+          test -x /tmp/apple_cos53_attack_destiny
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Assert integrated attack routing
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A expected=(
+            [100]=single [400]=wg2_utility [700]=wg2_ui [1200]=wg2_ui
+            [3000]=wg3_default [15000]=pool2_clean [29999]=pool2_clean
+            [30000]=wg2_ui [40000]=wg3_user [40001]=wg2_ui [75000]=wg2_ui
+            [78000]=wg3_utility [79000]=wg3_default [80000]=wg2_utility
+            [81000]=wg3_default [82000]=wg2_default [100000]=wg3_default
+            [200000]=wg3_utility [500000]=wg3_default [1000000]=wg3_default
+          )
+          for n in "${!expected[@]}"; do
+            got="$(bash benchmark_support/run_apple_cos53_ATTACK_DESTINY.sh route "$n")"
+            [[ "$got" == "${expected[$n]}" ]]
+          done
+
+      - name: Validate unchanged math
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_ATTACK_DESTINY.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Benchmark ATTACK DESTINY vs DESTINY vs Apple M1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+
+          run_attack()  { bash benchmark_support/run_apple_cos53_ATTACK_DESTINY.sh one "$1"; }
+          run_destiny() { bash benchmark_support/run_apple_cos53_PATCH_cpu_fix.sh one "$1"; }
+          run_apple()   { /tmp/apple_cos53_off_frozen apple "$1"; }
+
+          for r in 1 2 3; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }} + n) % 3 ))
+              if (( order == 0 )); then seq=(ATTACK DESTINY APPLE)
+              elif (( order == 1 )); then seq=(DESTINY APPLE ATTACK)
+              else seq=(APPLE ATTACK DESTINY)
+              fi
+              for who in "${seq[@]}"; do
+                case "$who" in
+                  ATTACK)  run_attack "$n" ;;
+                  DESTINY) run_destiny "$n" ;;
+                  APPLE)   run_apple "$n" ;;
+                esac \
+                  | sed -E "s/stack=[^ ]+/stack=$who/" \
+                  | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" \
+                  | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-attack-destiny-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
