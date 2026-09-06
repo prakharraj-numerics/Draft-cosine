@@ -1,0 +1,121 @@
+name: Apple COS53 canonical CPU exhaustive sweep
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-canonical-cpu-v2-20260906
+    paths:
+      - '.github/workflows/apple-cos53-canonical-cpu-sweep.yml'
+
+concurrency:
+  group: apple-cos53-canonical-cpu-sweep
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build canonical and all hot candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh')
+          s=p.read_text()
+          a=s.index("a=s.index('static int validate_mode()')")
+          b=s.index("print('K1280_RETUNE'", a)
+          s=s[:a]+"Path('/tmp/candidate_stress.cpp').write_text(s)\n"+s[b:]
+          s=s.replace('  echo "=== stressed 1M MPFR256 diagnostic ==="\n  /tmp/apple_cos53_k1280_fastreduce_stress validate\n','')
+          p.write_text(s)
+          PY
+          bash benchmark_support/run_apple_cos53_k1280_fastreduce_vs_vvcos.sh build
+          cp /tmp/apple_cos53_k1280_fastreduce_bench /tmp/apple_cos53_canonical_frozen_bench
+          bash benchmark_support/run_apple_cos53_cpu_eff_all_attacks.sh build
+          cp /tmp/apple_cos53_cpu_eff_bench /tmp/apple_cos53_canonical_optimized_bench
+          bash benchmark_support/run_apple_cos53_apple_specific_eff.sh build
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh build
+
+      - name: Validate hot kernel
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_hotloop_eff.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Sweep modes against canonical
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          echo "slot=${{ matrix.slot }} canonical_sha=14c74c60c3d2507033c49fff10382ccc11c308e1" > "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 100000 200000 500000 1000000)
+          native_modes=(single adapt2 pool2 pool3 auto)
+          apple_modes=(single_ui single_user single_default single_utility wg2_ui wg2_user wg2_default wg2_utility wg3_ui wg3_user wg3_default wg3_utility)
+
+          canonical_mode() {
+            case "$1" in
+              100) echo single ;;
+              400|700|1200|500000|1000000) echo frozen ;;
+              3000|7500|15000|50000|100000) echo auto ;;
+              5000|29999|40001) echo adapt2 ;;
+              30000|40000|200000) echo pool3 ;;
+            esac
+          }
+          run_canonical() {
+            local n="$1" m="$2"
+            if [[ "$m" == frozen ]]; then
+              /tmp/apple_cos53_canonical_frozen_bench candidate "$n" | sed 's/stack=candidate/stack=canonical/'
+            else
+              /tmp/apple_cos53_canonical_optimized_bench "$m" "$n" | sed "s/stack=$m/stack=canonical/"
+            fi
+          }
+
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              cm="$(canonical_mode "$n")"
+              run_canonical "$n" "$cm" | sed "s/^/round=$((r+1)) n=$n mode=canonical /" | tee -a "$OUT"
+
+              # Rotate mode ordering by slot/round so no candidate owns a fixed thermal position.
+              shift=$(( (r + ${{ matrix.slot }}) % ${#native_modes[@]} ))
+              for ((k=0;k<${#native_modes[@]};k++)); do
+                idx=$(( (k+shift) % ${#native_modes[@]} )); m="${native_modes[$idx]}"
+                bash benchmark_support/run_apple_cos53_hotloop_eff.sh one "$m" "$n" \
+                  | sed "s/stack=$m/stack=candidate/" \
+                  | sed "s/^/round=$((r+1)) n=$n mode=hot_$m /" | tee -a "$OUT"
+              done
+
+              shift2=$(( (r + ${{ matrix.slot }}) % ${#apple_modes[@]} ))
+              for ((k=0;k<${#apple_modes[@]};k++)); do
+                idx=$(( (k+shift2) % ${#apple_modes[@]} )); m="${apple_modes[$idx]}"
+                bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one "$m" "$n" \
+                  | sed "s/stack=$m/stack=candidate/" \
+                  | sed "s/^/round=$((r+1)) n=$n mode=hot_$m /" | tee -a "$OUT"
+              done
+            done
+          done
+
+          for r in 0 1 2; do
+            for n in "${sizes[@]}"; do
+              /tmp/apple_cos53_canonical_frozen_bench apple "$n" \
+                | sed 's/stack=apple/stack=vvcos/' \
+                | sed "s/^/apple_round=$((r+1)) n=$n mode=vvcos /" | tee -a "$OUT"
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-canonical-cpu-sweep-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
