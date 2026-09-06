@@ -1,0 +1,108 @@
+name: Apple COS53 REST fixed-transfer-all vs REST vs vvcos
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/apple-cos53-REST-fixed-transfer-all-20260906
+    paths:
+      - 'benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh'
+      - '.github/workflows/apple-cos53-REST-fixed-transfer-all-vs-vvcos.yml'
+
+concurrency:
+  group: apple-cos53-rest-fixed-transfer-all
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove REST untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          REST=925ae7aad2a8878e325f521b1dcc69d5eb443e99
+          git merge-base --is-ancestor "$REST" HEAD
+          git diff --name-only "$REST"...HEAD | sort > /tmp/changed.txt
+          printf '%s\n' \
+            '.github/workflows/apple-cos53-REST-fixed-transfer-all-vs-vvcos.yml' \
+            'benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh' | sort > /tmp/allowed.txt
+          diff -u /tmp/allowed.txt /tmp/changed.txt
+
+      - name: Build REST and FIXED transfer copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh build
+          test -x /tmp/apple_cos53_REST_fixed_transfer_hotapple
+          test -x /tmp/apple_cos53_off_frozen
+
+      - name: Assert FIXED transfer map
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in 3000 79000 81000 100000 500000; do
+            [[ "$(bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh route "$n")" == hot_wg3_default ]]
+          done
+          for n in 100 400 700 1200 15000 29999 30000 40000 40001 75000 78000 80000 82000 200000 1000000; do
+            [[ "$(bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh route "$n")" == REST ]]
+          done
+
+      - name: Validate FIXED math
+        if: matrix.slot == 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh validate | tee /tmp/out/accuracy.txt
+
+      - name: Benchmark REST vs FIXED vs Apple M1
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          OUT=/tmp/out/results.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+
+          run_rest() {
+            bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh one "$1"
+          }
+          run_fixed() {
+            bash benchmark_support/run_apple_cos53_REST_fixed_transfer_all.sh one "$1"
+          }
+          run_apple() {
+            /tmp/apple_cos53_off_frozen apple "$1"
+          }
+
+          for r in 1 2 3; do
+            for n in "${sizes[@]}"; do
+              order=$(( (r + ${{ matrix.slot }} + n) % 3 ))
+              if (( order == 0 )); then seq=(REST FIXED APPLE)
+              elif (( order == 1 )); then seq=(FIXED APPLE REST)
+              else seq=(APPLE REST FIXED)
+              fi
+              for who in "${seq[@]}"; do
+                case "$who" in
+                  REST)  run_rest "$n"  | sed -E 's/stack=[^ ]+/stack=REST/' ;;
+                  FIXED) run_fixed "$n" | sed -E 's/stack=[^ ]+/stack=FIXED/' ;;
+                  APPLE) run_apple "$n" | sed -E 's/stack=[^ ]+/stack=APPLE/' ;;
+                esac | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n /" | tee -a "$OUT"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-cos53-rest-fixed-transfer-all-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
