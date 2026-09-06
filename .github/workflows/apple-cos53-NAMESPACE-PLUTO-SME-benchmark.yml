@@ -59,15 +59,31 @@ jobs:
           cp benchmark_support/apple_cos53_pluto_sme_m4.cpp /tmp/pluto_sme_candidate.cpp
           python3 benchmark_support/patch_pluto_sme_streaming.py /tmp/pluto_sme_candidate.cpp
 
+          cat >/tmp/pluto_sme_entry.s <<'ASM'
+          .text
+          .globl _pluto_sme_eval_raw
+          .p2align 2
+          _pluto_sme_eval_raw:
+              stp x29, x30, [sp, #-16]!
+              mov x29, sp
+              smstart
+              bl _pluto_sme_stream
+              smstop
+              ldp x29, x30, [sp], #16
+              ret
+          ASM
+
           COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2+sme-f64f64 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
           clang++ $COMMON -I/tmp/pluto-art -c /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_candidate.o
           clang++ $COMMON -I/tmp/pluto-art -S /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_candidate.s
           ! grep -q 'pthreadpool' /tmp/pluto_sme_candidate.cpp
+          grep -q 'pluto_sme_stream' /tmp/pluto_sme_candidate.s
           echo '--- required ZA/FMOPA proof ---'
           grep -Ein '\bfmopa\b' /tmp/pluto_sme_candidate.s | tee /tmp/fmopa-proof.txt
           test -s /tmp/fmopa-proof.txt
-          grep -Ein '\b(smstart|zero[[:space:]]+za|st1d.*za)\b' /tmp/pluto_sme_candidate.s | head -30 || true
-          clang++ /tmp/pluto_sme_candidate.o -framework Accelerate -pthread -o /tmp/pluto_sme_bench
+          grep -Ein '\b(zero[[:space:]]+za|st1d.*za)\b' /tmp/pluto_sme_candidate.s | head -30 || true
+          clang -c -march=armv9.2-a+sme+sme2+sme-f64f64 /tmp/pluto_sme_entry.s -o /tmp/pluto_sme_entry.o
+          clang++ /tmp/pluto_sme_candidate.o /tmp/pluto_sme_entry.o -framework Accelerate -pthread -o /tmp/pluto_sme_bench
 
       - name: Build accuracy validator
         shell: bash
@@ -78,7 +94,7 @@ jobs:
           COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2+sme-f64f64 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
           clang++ $COMMON -DOPT_VALIDATE_MPFR -I/tmp/pluto-art -I"$MP/include" -I"$GP/include" \
             -c /tmp/pluto_sme_candidate.cpp -o /tmp/pluto_sme_validate.o
-          clang++ /tmp/pluto_sme_validate.o -framework Accelerate -pthread \
+          clang++ /tmp/pluto_sme_validate.o /tmp/pluto_sme_entry.o -framework Accelerate -pthread \
             -L"$MP/lib" -L"$GP/lib" -lmpfr -lgmp -o /tmp/pluto_sme_validate
 
       - name: Accuracy gate <=2 ULP
@@ -146,3 +162,4 @@ jobs:
             /tmp/summary.tsv
             /tmp/fmopa-proof.txt
             /tmp/pluto_sme_candidate.s
+            /tmp/pluto_sme_entry.s
