@@ -1,4 +1,4 @@
-name: Apple COS53 rusage energy probe
+name: Apple COS53 REST vs Apple wakeup efficiency all batches
 
 on:
   workflow_dispatch:
@@ -9,66 +9,120 @@ on:
       - '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
 
 concurrency:
-  group: apple-cos53-rusage-energy-probe
+  group: apple-cos53-rest-vs-apple-wakeup-eff
   cancel-in-progress: true
 
 jobs:
-  probe:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4]
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Prove exact frozen REST plus workflow only
         shell: bash
         run: |
           set -euo pipefail
           REST=925ae7aad2a8878e325f521b1dcc69d5eb443e99
           git merge-base --is-ancestor "$REST" HEAD
+          test "$(git hash-object benchmark_support/run_apple_cos53_WORK_smooth_switch.sh)" = f33a3187b191c076397f433c56111b2f041dfa4a
           changed="$(git diff --name-only "$REST" HEAD | sort)"
           test "$changed" = '.github/workflows/apple-cos53-production-1m-log-outliers.yml'
-      - name: Probe rusage_info_current energy fields
+
+      - name: Lengthen benchmark windows only and build exact REST
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          hits=0
+          for p in Path('benchmark_support').glob('*.sh'):
+              s=p.read_text()
+              n=s.count('2000000/n')
+              if n:
+                  p.write_text(s.replace('2000000/n','400000000/n'))
+                  hits += n
+          print('reps_patch_hits',hits)
+          assert hits >= 2
+          PY
+          bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh build
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 29999)" == pool2 ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 30000)" == wg2_ui ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 40001)" == wg2_ui ]]
+          [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 80000)" == wg2_utility_s8 ]]
+
+      - name: Measure REST and Apple wakeup efficiency
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out
-          cat >/tmp/rusage_energy_probe.cpp <<'CPP'
-          #include <libproc.h>
-          #include <sys/resource.h>
-          #include <sys/wait.h>
-          #include <unistd.h>
-          #include <chrono>
-          #include <cmath>
-          #include <cstdio>
-          #include <cstdlib>
-          int main(){
-            pid_t p=fork();
-            if(p==0){
-              volatile double x=0.123;
-              auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
-              while(std::chrono::steady_clock::now()<end){
-                for(int i=0;i<200000;i++) x=std::cos(x+i*1e-9);
-              }
-              std::_Exit((int)x);
-            }
-            usleep(400000);
-            rusage_info_current ri{};
-            int rc=proc_pid_rusage(p,RUSAGE_INFO_CURRENT,(rusage_info_t*)&ri);
-            std::printf("rc=%d user_ns=%llu system_ns=%llu pkg_idle=%llu intr=%llu energy_nj=%llu penergy_nj=%llu instructions=%llu cycles=%llu pinstructions=%llu pcycles=%llu\n",
-              rc,
-              (unsigned long long)ri.ri_user_time,(unsigned long long)ri.ri_system_time,
-              (unsigned long long)ri.ri_pkg_idle_wkups,(unsigned long long)ri.ri_interrupt_wkups,
-              (unsigned long long)ri.ri_energy_nj,(unsigned long long)ri.ri_penergy_nj,
-              (unsigned long long)ri.ri_instructions,(unsigned long long)ri.ri_cycles,
-              (unsigned long long)ri.ri_pinstructions,(unsigned long long)ri.ri_pcycles);
-            int st=0; waitpid(p,&st,0); return 0;
+          OUT=/tmp/out/results.txt
+          : > "$OUT"
+          sizes=(100 400 700 1200 3000 5000 7500 15000 29999 30000 40000 40001 50000 78000 80000 82000 100000 200000 500000 1000000)
+
+          measure_one() {
+            who="$1"; n="$2"; round="$3"
+            base="/tmp/out/${who}_${n}_r${round}"
+            if [[ "$who" == REST ]]; then
+              bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh one "$n" >"${base}.run" 2>&1 &
+            else
+              /tmp/apple_cos53_off_frozen apple "$n" >"${base}.run" 2>&1 &
+            fi
+            pid=$!
+            sleep 0.10
+            set +e
+            sudo -n /usr/bin/powermetrics --samplers tasks -r pid -i 100 -n 6 >"${base}.pm" 2>&1
+            pmrc=$?
+            wait "$pid"
+            runrc=$?
+            set -e
+            if (( runrc != 0 )); then cat "${base}.run"; return "$runrc"; fi
+            python3 - "$who" "$n" "$round" "$pid" "$pmrc" "${base}.run" "${base}.pm" <<'PY' | tee -a "$OUT"
+          import sys,re,statistics
+          who,n,round_,pid,pmrc,runf,pmf=sys.argv[1:]
+          txt=open(runf,errors='replace').read()
+          m=re.search(r'wall_ns_el=([0-9.eE+-]+)\s+cpu_ns_el=([0-9.eE+-]+).*?reps=(\d+)',txt)
+          if not m:
+              print(txt,file=sys.stderr); raise SystemExit('missing benchmark result')
+          wall=float(m.group(1)); cpu=float(m.group(2)); reps=int(m.group(3))
+          if reps < 100: raise SystemExit(f'reps too short: {reps}')
+          rows=[]
+          for line in open(pmf,errors='replace'):
+              t=line.split()
+              if len(t) >= 9 and t[1] == pid:
+                  try:
+                      cpu_ms_s=float(t[2]); intr_s=float(t[6]); pkg_s=float(t[7])
+                  except ValueError:
+                      continue
+                  rows.append((cpu_ms_s,intr_s,pkg_s))
+          if len(rows) < 3:
+              print(open(pmf,errors='replace').read(),file=sys.stderr)
+              raise SystemExit(f'only {len(rows)} powermetrics rows pid={pid} pmrc={pmrc}')
+          cpu_rate=statistics.median(x[0] for x in rows)
+          intr_rate=statistics.median(x[1] for x in rows)
+          pkg_rate=statistics.median(x[2] for x in rows)
+          # rate (/s) * wall(ns/input) / 1000 = events per million inputs
+          intr_m=intr_rate*wall/1000.0
+          pkg_m=pkg_rate*wall/1000.0
+          print(f'slot=${{ matrix.slot }} round={round_} n={n} who={who} wall_ns_el={wall:.9f} cpu_ns_el={cpu:.9f} cpu_ms_s={cpu_rate:.6f} intr_s={intr_rate:.6f} pkg_idle_s={pkg_rate:.6f} intr_per_million={intr_m:.9f} pkg_idle_per_million={pkg_m:.9f} pm_samples={len(rows)} reps={reps}')
+          PY
           }
-          CPP
-          clang++ -O2 -std=c++20 /tmp/rusage_energy_probe.cpp -o /tmp/rusage_energy_probe
-          /tmp/rusage_energy_probe | tee /tmp/out/rusage_energy.txt
+
+          for r in 1 2; do
+            for n in "${sizes[@]}"; do
+              if (( (r + ${{ matrix.slot }} + n) % 2 == 0 )); then seq=(REST APPLE); else seq=(APPLE REST); fi
+              for who in "${seq[@]}"; do measure_one "$who" "$n" "$r"; done
+            done
+          done
+
       - uses: actions/upload-artifact@v4
         with:
-          name: apple-cos53-rusage-energy-probe
+          name: apple-cos53-rest-vs-apple-wakeup-${{ matrix.slot }}
           path: /tmp/out
           if-no-files-found: error
