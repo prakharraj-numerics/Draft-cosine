@@ -1,0 +1,129 @@
+name: Apple COS53 EARTH efficiency
+on:
+  workflow_dispatch:
+  push:
+    branches: [exp/apple-cos53-PLUTO-SME-M4-20260906]
+    paths:
+      - .github/workflows/apple-cos53-EARTH-efficiency.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  bench:
+    runs-on: nscloud-macos-tahoe-arm64-6x14
+    timeout-minutes: 20
+    env:
+      VECLIB_MAXIMUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hardware and counter capability probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "chip=$(sysctl -n machdep.cpu.brand_string)"
+            echo "SME=$(sysctl -n hw.optional.arm.FEAT_SME) SME2=$(sysctl -n hw.optional.arm.FEAT_SME2) max_svl_bytes=$(sysctl -n hw.optional.arm.sme_max_svl_b)"
+            echo "xctrace=$(xcrun --find xctrace 2>/dev/null || true)"
+            echo "--- xctrace templates ---"
+            xcrun xctrace list templates 2>&1 || true
+            echo "--- powermetrics help probe ---"
+            /usr/bin/powermetrics --help 2>&1 | head -80 || true
+          } | tee /tmp/capabilities.txt
+          test "$(sysctl -n hw.optional.arm.FEAT_SME)" = 1
+          test "$(sysctl -n hw.optional.arm.sme_max_svl_b)" = 64
+      - name: Fetch frozen PLUTO coefficients
+        uses: actions/download-artifact@v4
+        with:
+          name: pluto-m4-generated-source
+          path: /tmp/pluto-art
+          github-token: ${{ github.token }}
+          repository: prakharraj-numerics/Draft-cosine
+          run-id: '34051479551'
+      - name: Build frozen EARTH efficiency harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark_support/apple_cos53_pluto_sme_m4.cpp /tmp/pluto_diag.cpp
+          python3 benchmark_support/patch_pluto_sme_streaming.py /tmp/pluto_diag.cpp
+          python3 benchmark_support/patch_pluto_sme_abcde_diag.py /tmp/pluto_diag.cpp
+          cat >/tmp/earth_entry.s <<'ASM'
+          .text
+          .macro SMWRAP raw, stream
+          .globl \raw
+          .p2align 2
+          \raw:
+              stp x29, x30, [sp, #-16]!
+              mov x29, sp
+              smstart sm
+              bl \stream
+              smstop sm
+              ldp x29, x30, [sp], #16
+              ret
+          .endm
+          SMWRAP _pluto_diag_C_raw, _pluto_diag_C_stream
+          ASM
+          cat >/tmp/earth_eff.cpp <<'CPP'
+          #include <Accelerate/Accelerate.h>
+          #include <mach/mach.h>
+          #include <mach/mach_time.h>
+          #include <sys/resource.h>
+          #include <algorithm>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <vector>
+
+          static volatile double sink=0.0;
+          extern "C" void pluto_diag_C_raw(const double*,double*,size_t,const double*,const double*,const double*,const uint64_t*);
+          static uint64_t mix64(uint64_t x){x^=x>>30;x*=UINT64_C(0xbf58476d1ce4e5b9);x^=x>>27;x*=UINT64_C(0x94d049bb133111eb);x^=x>>31;return x;}
+          static double unit52(uint64_t h){return ((double)(h>>12)+0.5)*0x1p-52;}
+          static double wall_ns(uint64_t t){static mach_timebase_info_data_t tb=[](){mach_timebase_info_data_t x{};mach_timebase_info(&x);return x;}();return (double)t*tb.numer/tb.denom;}
+          static double tv_ns(const timeval& t){return (double)t.tv_sec*1e9+(double)t.tv_usec*1e3;}
+          static double cpu_now_ns(){rusage r{};getrusage(RUSAGE_SELF,&r);return tv_ns(r.ru_utime)+tv_ns(r.ru_stime);}
+          static uint64_t rss_bytes(){mach_task_basic_info_data_t i{};mach_msg_type_number_t n=MACH_TASK_BASIC_INFO_COUNT;if(task_info(mach_task_self(),MACH_TASK_BASIC_INFO,(task_info_t)&i,&n)!=KERN_SUCCESS)return 0;return (uint64_t)i.resident_size;}
+
+          struct P{std::vector<double>x,d,c0,c1,y;std::vector<uint64_t>q;};
+          static P prep(size_t n){P z;z.x.resize(n);z.d.resize(n);z.c0.resize(n);z.c1.resize(n);z.q.resize(n);z.y.resize(n);for(size_t i=0;i<n;i++){double u=unit52(mix64(2026090711ULL+i*0x9e3779b97f4a7c15ULL));z.x[i]=10000*u-5000;z.d[i]=(unit52(mix64(i+11))-0.5)*0x1p-10;double a=unit52(mix64(i+23))*1.57;z.c0[i]=cos(a);z.c1[i]=-sin(a);double qm=fabs(z.x[i])*0x1.45f306dc9c883p-2+0x1p52;memcpy(&z.q[i],&qm,8);}return z;}
+          static void earth(P&z){pluto_diag_C_raw(z.x.data(),z.y.data(),z.x.size(),z.d.data(),z.c0.data(),z.c1.data(),z.q.data());}
+          static void apple(P&z){int n=(int)z.x.size();vvcos(z.y.data(),z.x.data(),&n);}
+          using F=void(*)(P&);
+          struct M{double wall,cpu;uint64_t rss;};
+          static M bench(F f,P&z){for(int i=0;i<30;i++)f(z);size_t r=std::max<size_t>(4,12000000/z.x.size());uint64_t rb=rss_bytes();double c0=cpu_now_ns();uint64_t t0=mach_absolute_time();for(size_t i=0;i<r;i++)f(z);uint64_t t1=mach_absolute_time();double c1=cpu_now_ns();uint64_t ra=rss_bytes();sink+=z.y[z.x.size()/3];M m; m.wall=wall_ns(t1-t0)/(double)(r*z.x.size());m.cpu=(c1-c0)/(double)(r*z.x.size());m.rss=ra>rb?ra-rb:0;return m;}
+          int main(){size_t sizes[]={100,400,700,1200,3000,15000,30000,80000,200000,500000,1000000};for(auto n:sizes){P z=prep(n);M e[5],a[5];for(int k=0;k<5;k++){e[k]=bench(earth,z);a[k]=bench(apple,z);}auto med=[](M* v,auto proj){double x[5];for(int i=0;i<5;i++)x[i]=proj(v[i]);std::sort(x,x+5);return x[2];};double ew=med(e,[](M&m){return m.wall;}),aw=med(a,[](M&m){return m.wall;}),ec=med(e,[](M&m){return m.cpu;}),ac=med(a,[](M&m){return m.cpu;});uint64_t er=0,ar=0;for(auto&m:e)er=std::max(er,m.rss);for(auto&m:a)ar=std::max(ar,m.rss);printf("EARTH_EFF n=%zu earth_wall=%.9f apple_wall=%.9f speed_ratio=%.6f earth_cpu=%.9f apple_cpu=%.9f cpu_eff_ratio=%.6f earth_rss_delta=%llu apple_rss_delta=%llu earth_logical_B=40.0 apple_api_min_B=16.0\n",n,ew,aw,aw/ew,ec,ac,ac/ec,(unsigned long long)er,(unsigned long long)ar);}return sink==123456.0;}
+          CPP
+          COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
+          clang++ $COMMON -Dmain=diag_unused_main -I/tmp/pluto-art -c /tmp/pluto_diag.cpp -o /tmp/pluto_diag.o
+          clang -c -march=armv9.2-a+sme+sme2 /tmp/earth_entry.s -o /tmp/entry.o
+          clang++ -O3 -DNDEBUG -std=c++20 /tmp/earth_eff.cpp /tmp/pluto_diag.o /tmp/entry.o -framework Accelerate -pthread -o /tmp/earth_eff
+      - name: Benchmark wall CPU and memory footprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/earth_eff | tee /tmp/results.txt
+      - name: Attempt hardware instruction counters
+        shell: bash
+        run: |
+          set +e
+          : > /tmp/counters.txt
+          if xcrun xctrace list templates 2>/dev/null | grep -qi 'counter'; then
+            echo "Counters template available; attempting short trace." | tee -a /tmp/counters.txt
+            rm -rf /tmp/earth.trace
+            xcrun xctrace record --template 'Counters' --time-limit 2s --output /tmp/earth.trace --launch -- /tmp/earth_eff >>/tmp/counters.txt 2>&1
+            RC=$?
+            echo "xctrace_rc=$RC" | tee -a /tmp/counters.txt
+            if [ $RC -eq 0 ]; then
+              xcrun xctrace export --input /tmp/earth.trace --toc >>/tmp/counters.txt 2>&1
+            fi
+          else
+            echo "Counters template unavailable on this runner." | tee -a /tmp/counters.txt
+          fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: earth-apple-efficiency
+          path: |
+            /tmp/capabilities.txt
+            /tmp/results.txt
+            /tmp/counters.txt
