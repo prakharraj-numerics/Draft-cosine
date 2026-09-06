@@ -1,0 +1,158 @@
+name: Apple COS53 PLUTO MATH SWEEP vs PLUTO vs Apple
+
+on:
+  push:
+    branches: [exp/apple-cos53-PLUTO-MATH-SWEEP-20260906]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-cos53-pluto-math-sweep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: macos-15
+    outputs:
+      candidates: ${{ steps.select.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove frozen PLUTO untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUTO=d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+          git fetch origin freeze/apple-cos53-PLUTO-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$PLUTO"
+          git merge-base --is-ancestor "$PLUTO" HEAD
+      - name: Build all math candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh build
+          mkdir -p /tmp/out
+          bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh variants | tee /tmp/out/variants.txt
+      - name: Accuracy gate every candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          : >/tmp/out/accuracy.txt
+          : >/tmp/out/survivors.txt
+          while read -r v; do
+            echo "=== $v ===" | tee -a /tmp/out/accuracy.txt
+            txt=$(bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh validate "$v")
+            printf '%s\n' "$txt" | tee -a /tmp/out/accuracy.txt
+            max=$(printf '%s\n' "$txt" | awk '
+              /APPLE_COS53_CPU_EFF_ACCURACY/ {for(i=1;i<=NF;i++)if($i~/^maxulp=/){split($i,a,"=");if(a[2]+0>m)m=a[2]+0;found=1}}
+              END{if(!found)print 999999;else print m+0}')
+            echo "SUMMARY variant=$v maxulp=$max" | tee -a /tmp/out/accuracy.txt
+            if (( max <= 2 )); then echo "$v" >> /tmp/out/survivors.txt; fi
+          done </tmp/out/variants.txt
+          test -s /tmp/out/survivors.txt
+      - name: 1M paired survivor shootout
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/smoke_1m.txt; : >"$OUT"
+          for r in 1 2 3 4; do
+            bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh pluto 1000000 | sed "s/^/round=$r role=PLUTO /" | tee -a "$OUT"
+            while read -r v; do
+              bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh one "$v" 1000000 | sed "s/^/round=$r role=$v /" | tee -a "$OUT"
+            done </tmp/out/survivors.txt
+            bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh apple 1000000 | sed "s/^/round=$r role=APPLE /" | tee -a "$OUT"
+          done
+      - name: Select top four math survivors
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,statistics
+          rows={}
+          for line in Path('/tmp/out/smoke_1m.txt').read_text().splitlines():
+              m=re.search(r'role=(\S+).*wall_ns_el=([0-9.]+).*cpu_ns_el=([0-9.]+)',line)
+              if m: rows.setdefault(m.group(1),[]).append((float(m.group(2)),float(m.group(3))))
+          scores=[]
+          for role,x in rows.items():
+              if role in ('PLUTO','APPLE'): continue
+              w=statistics.median(v[0] for v in x); c=statistics.median(v[1] for v in x)
+              scores.append((w+c,w,c,role))
+          scores.sort()
+          best=[x[3] for x in scores[:4]]
+          if not best: raise SystemExit('no accuracy-safe candidate')
+          Path('/tmp/out/selection.txt').write_text('\n'.join(f'{r} wall={w:.9f} cpu={c:.9f}' for _,w,c,r in scores)+'\nSELECTED '+' '.join(best)+'\n')
+          with open(__import__('os').environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+' '.join(best)+'\n')
+          print('SELECTED',*best)
+          PY
+          cat /tmp/out/selection.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-math-smoke
+          path: /tmp/out
+          if-no-files-found: error
+
+  benchmark:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove frozen PLUTO untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUTO=d4110c3db944c53b86e8fb1c680b8b78d2ebe35d
+          git fetch origin freeze/apple-cos53-PLUTO-20260906
+          test "$(git rev-parse FETCH_HEAD)" = "$PLUTO"
+      - name: Build selected candidates and controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh build
+          mkdir -p /tmp/out
+          echo "selected=${{ needs.smoke.outputs.candidates }}" | tee /tmp/out/selection.txt
+      - name: Full paired single-thread 20-batch ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/out/results_${{ matrix.slot }}.txt; : >"$OUT"
+          sizes=(100 400 700 1200 3000 15000 29999 30000 40000 40001 75000 78000 79000 80000 81000 82000 100000 200000 500000 1000000)
+          CANDS=( ${{ needs.smoke.outputs.candidates }} )
+          for r in 1 2 3; do
+            idx=0
+            for n in "${sizes[@]}"; do
+              idx=$((idx+1))
+              # Rotate candidate/control ordering to reduce thermal/order bias.
+              roles=(PLUTO "${CANDS[@]}" APPLE)
+              shift=$(((r+idx+${{ matrix.slot }})%${#roles[@]}))
+              for ((z=0;z<${#roles[@]};z++)); do
+                role=${roles[$(((z+shift)%${#roles[@]}))]}
+                if [[ "$role" == PLUTO ]]; then cmd=(bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh pluto "$n")
+                elif [[ "$role" == APPLE ]]; then cmd=(bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh apple "$n")
+                else cmd=(bash benchmark_support/run_apple_cos53_PLUTO_MATH_SWEEP.sh one "$role" "$n")
+                fi
+                "${cmd[@]}" | sed "s/^/slot=${{ matrix.slot }} round=$r n=$n role=$role /" | tee -a "$OUT"
+              done
+            done
+          done
+          awk '
+            /role=APPLE/ {for(i=1;i<=NF;i++)if($i~/^effective_cores=/){split($i,a,"=");if(a[2]>1.10)bad=1}}
+            /role=PLUTO/ {for(i=1;i<=NF;i++)if($i~/^effective_cores=/){split($i,a,"=");if(a[2]>1.10)bad=1}}
+            /role=(direct1|pio2|hybrid|nolut|halfoct)/ {for(i=1;i<=NF;i++)if($i~/^effective_cores=/){split($i,a,"=");if(a[2]>1.10)bad=1}}
+            END{exit bad}
+          ' "$OUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pluto-math-ladder-${{ matrix.slot }}
+          path: /tmp/out
+          if-no-files-found: error
