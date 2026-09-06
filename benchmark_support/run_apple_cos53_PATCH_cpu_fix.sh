@@ -5,9 +5,9 @@ set -euo pipefail
 #   5f13c87218873fd9353ef5ab549b8170d8bf3e2a
 # Frozen PATCH itself is never modified.
 #
-# Selection rule: replace a PATCH route only when the 4-slot x 3-round paired
-# M1 sweeps showed the candidate both faster AND lower-process-CPU than PATCH,
-# with a material CPU improvement.  Otherwise delegate to exact PATCH.
+# Final selection rule after the full 4-slot x 3-round ladder verification:
+# replace PATCH only where the candidate remained BOTH faster and lower-CPU
+# than PATCH in the verification run.  All other sizes delegate to PATCH.
 
 MODE="${1:-}"
 
@@ -28,10 +28,6 @@ fi
 route_for() {
   case "$1" in
     1200)   echo wg2_ui ;;
-    30000)  echo wg2_default ;;
-    79000)  echo wg3_ui_s8 ;;
-    100000) echo wg3_utility_s0 ;;
-    200000) echo wg3_user_s0 ;;
     500000) echo wg3_default_s0 ;;
     *)      echo PATCH ;;
   esac
@@ -49,14 +45,6 @@ if [[ "$MODE" == one ]]; then
   case "$(route_for "$n")" in
     wg2_ui)
       exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one wg2_ui "$n" ;;
-    wg2_default)
-      exec bash benchmark_support/run_apple_cos53_hotloop_eff.sh apple_one wg2_default "$n" ;;
-    wg3_ui_s8)
-      exec /tmp/apple_cos53_cpu_pocket_attack wg3_ui_s8 "$n" ;;
-    wg3_utility_s0)
-      exec /tmp/apple_cos53_cpu_pocket_attack wg3_utility_s0 "$n" ;;
-    wg3_user_s0)
-      exec /tmp/apple_cos53_cpu_pocket_attack wg3_user_s0 "$n" ;;
     wg3_default_s0)
       exec /tmp/apple_cos53_cpu_pocket_attack wg3_default_s0 "$n" ;;
     PATCH)
