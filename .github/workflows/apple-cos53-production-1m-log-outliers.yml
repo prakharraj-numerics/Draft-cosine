@@ -34,19 +34,16 @@ jobs:
           git merge-base --is-ancestor "$WORK" HEAD
           git merge-base --is-ancestor "$ATTACK" HEAD
           test "$(git hash-object benchmark_support/run_apple_cos53_WORK_smooth_switch.sh)" = f33a3187b191c076397f433c56111b2f041dfa4a
-          mapfile -t changed < <(git diff --name-only "$WORK" HEAD | sort)
-          printf '%s\n' "${changed[@]}"
-          expected=(.github/workflows/apple-cos53-production-1m-log-outliers.yml benchmark_support/run_apple_cos53_WORK_smooth_switch.sh)
-          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | sort)
-          test "${#changed[@]}" -eq "${#expected_sorted[@]}"
-          for i in "${!expected_sorted[@]}"; do test "${changed[$i]}" = "${expected_sorted[$i]}"; done
+          changed="$(git diff --name-only "$WORK" HEAD | sort)"
+          expected="$(printf '%s\n' '.github/workflows/apple-cos53-production-1m-log-outliers.yml' 'benchmark_support/run_apple_cos53_WORK_smooth_switch.sh' | sort)"
+          printf '%s\n' "$changed"
+          test "$changed" = "$expected"
           bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh build
 
       - name: Assert WORK and ATTACK routing
         shell: bash
         run: |
           set -euo pipefail
-          # Exact frozen WORK special routes.
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 78000)" == old_wg3_utility ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 80000)" == wg2_utility_s8 ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 82000)" == old_wg2_default ]]
@@ -54,7 +51,6 @@ jobs:
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 200000)" == old_wg3_utility ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 500000)" == frozen_baseline ]]
           [[ "$(bash benchmark_support/run_apple_cos53_cpu_pockets_selected.sh route 1000000)" == wg3_default_s8 ]]
-          # Exact rejected threshold-only attack wrapper.
           [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 3000)" == WORK ]]
           [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 29999)" == pool2 ]]
           [[ "$(bash benchmark_support/run_apple_cos53_WORK_smooth_switch.sh route 30000)" == wg2_ui ]]
