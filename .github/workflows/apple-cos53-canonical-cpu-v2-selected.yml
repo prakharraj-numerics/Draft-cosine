@@ -1,5 +1,6 @@
 name: Apple COS53 canonical CPU v2 selected
 
+# Re-run marker: selected map verified from exhaustive canonical sweep.
 on:
   workflow_dispatch:
   push:
