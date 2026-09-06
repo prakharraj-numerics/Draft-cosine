@@ -54,7 +54,6 @@ jobs:
           from pathlib import Path
           base=Path('/tmp/apple_cos53_cpu_eff.cpp').read_text()
           hot=Path('/tmp/apple_cos53_hotloop.cpp').read_text()
-
           validity='''    uint64x2_t valid=vcleq_f64(ax,vdupq_n_f64(XMAX));
               if ((vgetq_lane_u64(valid,0)&vgetq_lane_u64(valid,1)) != UINT64_MAX) {
                   y[0]=std::cos(x[0]); y[1]=std::cos(x[1]); return;
@@ -97,36 +96,28 @@ jobs:
           roots='''    if (__builtin_expect(j0 >= 2009, 0)) y[0]=std::cos(x[0]);
               if (__builtin_expect(j1 >= 2009, 0)) y[1]=std::cos(x[1]);
           '''
-
           assert validity in base and qold in base and jold in base and parityold in base
-
           def eval_replace(s, unroll, restrict=False):
-              a=s.index('static inline void opt_cos53_eval(')
-              b=s.index('\nclass Adaptive2',a)
+              a=s.index('static inline void opt_cos53_eval('); b=s.index('\nclass Adaptive2',a)
               r=' __restrict' if restrict else ''
               sig=f'''static inline void opt_cos53_eval(const double*{r} x,double*{r} y,size_t n)\n{{\n'''
-              body='    size_t i=0;\n'
-              body+=f'    for (; i+{unroll}<=n; i+={unroll}) {{\n'
+              body='    size_t i=0;\n'+f'    for (; i+{unroll}<=n; i+={unroll}) {{\n'
               for off in range(0,unroll,2): body+=f'        opt_pair(x+i+{off},y+i+{off});\n'
               body+='    }\n    for (; i+2<=n; i+=2) opt_pair(x+i,y+i);\n'
               body+='    if (i<n) { double xx[2]={x[i],x[i]}, yy[2]; opt_pair(xx,yy); y[i]=yy[0]; }\n}\n'
               return s[:a]+sig+body+s[b:]
-
           def magic_q(s):
               assert qold in s and parityold in s
               return s.replace(qold,qnew,1).replace(parityold,paritynew,1)
           def magic_j(s):
               assert jold in s
-              # If q magic already exists, reuse its magic variable rather than redeclare.
               repl=jnew if 'const float64x2_t magic=vdupq_n_f64(0x1p52);' not in s else jnew.replace('    const float64x2_t magic=vdupq_n_f64(0x1p52);\n','',1)
               return s.replace(jold,repl,1)
-
           variants={}
           variants['novalid']=base.replace(validity,'',1)
           variants['magicq']=magic_q(base)
           variants['magicj']=magic_j(base)
-          variants['restrict']=base.replace('static inline void opt_cos53_eval(const double* x,double* y,size_t n)',
-                                             'static inline void opt_cos53_eval(const double* __restrict x,double* __restrict y,size_t n)',1)
+          variants['restrict']=base.replace('static inline void opt_cos53_eval(const double* x,double* y,size_t n)','static inline void opt_cos53_eval(const double* __restrict x,double* __restrict y,size_t n)',1)
           variants['unroll8']=eval_replace(base,8,False)
           qj=magic_j(magic_q(base)); variants['qj']=qj
           variants['qj_novalid']=qj.replace(validity,'',1)
@@ -135,16 +126,12 @@ jobs:
           variants['hot_noroot']=hot.replace(roots,'',1)
           variants['hot_u16']=eval_replace(hot,16,True)
           variants['hot_u32']=eval_replace(hot,32,True)
-          for name,s in variants.items():
-              Path(f'/tmp/ab_{name}.cpp').write_text(s)
+          for name,s in variants.items(): Path(f'/tmp/ab_{name}.cpp').write_text(s)
           print('ABLATIONS', ' '.join(sorted(variants)))
           PY
-
           COMMON='-O3 -DNDEBUG -std=c++20 -mcpu=native -fno-fast-math -ffp-contract=fast'
           for v in novalid magicq magicj restrict unroll8 qj qj_novalid unroll8_restrict hot_noroot hot_u16 hot_u32; do
-            clang++ $COMMON -I/tmp -I/tmp/pthreadpool-install/include \
-              "/tmp/ab_${v}.cpp" /tmp/pthreadpool-install/lib/libpthreadpool.a \
-              -framework Accelerate -pthread -o "/tmp/ab_${v}"
+            clang++ $COMMON -I/tmp -I/tmp/pthreadpool-install/include "/tmp/ab_${v}.cpp" /tmp/pthreadpool-install/lib/libpthreadpool.a -framework Accelerate -pthread -o "/tmp/ab_${v}"
           done
 
       - name: Validate unchanged full hot kernel
@@ -175,7 +162,7 @@ jobs:
             done
           done
           for p in 1 2 3 4 8 16 32 64; do candidates+=("DAP${p}"); done
-
+          lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
           run_cand() {
             c="$1"
             case "$c" in
@@ -200,21 +187,20 @@ jobs:
               HOT_NOROOT) /tmp/ab_hot_noroot single 3000 ;;
               HOT_U16) /tmp/ab_hot_u16 single 3000 ;;
               HOT_U32) /tmp/ab_hot_u32 single 3000 ;;
-              SINGLE_*) q="${c#SINGLE_}"; /tmp/apple_cos53_fast_hotapple "single_${q,,}" 3000 ;;
-              WG2_*) q="${c#WG2_}"; /tmp/apple_cos53_fast_hotapple "wg2_${q,,}" 3000 ;;
-              WG3_*) q="${c#WG3_}"; /tmp/apple_cos53_fast_hotapple "wg3_${q,,}" 3000 ;;
+              SINGLE_*) q="${c#SINGLE_}"; ql="$(lower "$q")"; /tmp/apple_cos53_fast_hotapple "single_${ql}" 3000 ;;
+              WG2_*) q="${c#WG2_}"; ql="$(lower "$q")"; /tmp/apple_cos53_fast_hotapple "wg2_${ql}" 3000 ;;
+              WG3_*) q="${c#WG3_}"; ql="$(lower "$q")"; /tmp/apple_cos53_fast_hotapple "wg3_${ql}" 3000 ;;
               AP2) /tmp/apple_cos53_cpu_pocket_attack ap2 3000 ;;
               AP3) /tmp/apple_cos53_cpu_pocket_attack ap3 3000 ;;
               AP4) /tmp/apple_cos53_cpu_pocket_attack ap4 3000 ;;
               TWG*)
-                t="${c#TWG}"; p="${t%%_*}"; t="${t#*_}"; q="${t%%_S*}"; s="${t##*_S}"
-                /tmp/apple_cos53_cpu_pocket_attack "wg${p}_${q,,}_s${s}" 3000 ;;
+                t="${c#TWG}"; p="${t%%_*}"; t="${t#*_}"; q="${t%%_S*}"; s="${t##*_S}"; ql="$(lower "$q")"
+                /tmp/apple_cos53_cpu_pocket_attack "wg${p}_${ql}_s${s}" 3000 ;;
               DAP*) p="${c#DAP}"; /tmp/apple_cos53_cpu_pocket_attack "p${p}" 3000 ;;
               *) echo "unknown candidate $c" >&2; return 3 ;;
             esac
           }
           run_apple() { /tmp/apple_cos53_off_frozen apple 3000; }
-
           count=${#candidates[@]}
           for r in 1 2 3 4; do
             shift=$(( (r*17 + ${{ matrix.slot }}*11) % count ))
@@ -237,22 +223,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/out/disasm
-          declare -A bins=(
-            [OLD]=/tmp/apple_cos53_fast_optimized
-            [HOT]=/tmp/apple_cos53_fast_hotloop
-            [NOVALID]=/tmp/ab_novalid
-            [MAGICQ]=/tmp/ab_magicq
-            [MAGICJ]=/tmp/ab_magicj
-            [RESTRICT]=/tmp/ab_restrict
-            [UNROLL8]=/tmp/ab_unroll8
-            [QJ]=/tmp/ab_qj
-            [QJ_NOVALID]=/tmp/ab_qj_novalid
-            [UNROLL8_RESTRICT]=/tmp/ab_unroll8_restrict
-            [HOT_NOROOT]=/tmp/ab_hot_noroot
-            [HOT_U16]=/tmp/ab_hot_u16
-            [HOT_U32]=/tmp/ab_hot_u32
+          pairs=(
+            OLD:/tmp/apple_cos53_fast_optimized HOT:/tmp/apple_cos53_fast_hotloop
+            NOVALID:/tmp/ab_novalid MAGICQ:/tmp/ab_magicq MAGICJ:/tmp/ab_magicj RESTRICT:/tmp/ab_restrict
+            UNROLL8:/tmp/ab_unroll8 QJ:/tmp/ab_qj QJ_NOVALID:/tmp/ab_qj_novalid UNROLL8_RESTRICT:/tmp/ab_unroll8_restrict
+            HOT_NOROOT:/tmp/ab_hot_noroot HOT_U16:/tmp/ab_hot_u16 HOT_U32:/tmp/ab_hot_u32
           )
-          for k in "${!bins[@]}"; do otool -tvV "${bins[$k]}" > "/tmp/out/disasm/${k}.txt"; done
+          for pair in "${pairs[@]}"; do k="${pair%%:*}"; bin="${pair#*:}"; otool -tvV "$bin" > "/tmp/out/disasm/${k}.txt"; done
           python3 - <<'PY' > /tmp/out/instruction-audit.txt
           from pathlib import Path
           import re,glob
@@ -269,14 +246,11 @@ jobs:
                   if m: out.append(m.group(1).lower())
               return out
           def n(pat,ins): return sum(bool(re.search(pat,x)) for x in ins)
-          print('kernel static instruction census; counts are in emitted opt_cos53_eval body, not dynamic PMU counts')
+          print('kernel static instruction census; emitted opt_cos53_eval body, not dynamic PMU counts')
           print('variant total fcvtns scvtf fma fmul loads stores branches cmp lane_moves stack_mem cos_calls')
           for path in sorted(glob.glob('/tmp/out/disasm/*.txt')):
-              name=Path(path).stem; ins=function_lines(path); txt='\n'.join(ins)
-              vals=[len(ins),n(r'\bfcvtns\b',ins),n(r'\bscvtf\b',ins),n(r'\b(?:fmla|fmls|fmadd|fmsub)\b',ins),
-                    n(r'\bfmul\b',ins),n(r'^(?:ldr|ldp|ldur|ld1)\b',ins),n(r'^(?:str|stp|stur|st1)\b',ins),
-                    n(r'^(?:b\.|b\s|bl\s|blr\s|cbz\s|cbnz\s|tbz\s|tbnz\s)',ins),n(r'\bcmp\b|\bcmn\b',ins),
-                    n(r'\b(?:fmov\s+x|mov\.d\s+x|umov\s+x)',ins),sum('[sp' in x for x in ins),sum('_cos' in x or 'symbol stub for: _cos' in x for x in ins)]
+              name=Path(path).stem; ins=function_lines(path)
+              vals=[len(ins),n(r'\bfcvtns\b',ins),n(r'\bscvtf\b',ins),n(r'\b(?:fmla|fmls|fmadd|fmsub)\b',ins),n(r'\bfmul\b',ins),n(r'^(?:ldr|ldp|ldur|ld1)\b',ins),n(r'^(?:str|stp|stur|st1)\b',ins),n(r'^(?:b\.|b\s|bl\s|blr\s|cbz\s|cbnz\s|tbz\s|tbnz\s)',ins),n(r'\bcmp\b|\bcmn\b',ins),n(r'\b(?:fmov\s+x|mov\.d\s+x|umov\s+x)',ins),sum('[sp' in x for x in ins),sum('_cos' in x or 'symbol stub for: _cos' in x for x in ins)]
               print(name,*vals)
           PY
 
